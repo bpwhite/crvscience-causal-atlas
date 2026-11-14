@@ -63,7 +63,7 @@ Validation outputs (`causal_atlas_validation_summary.json` and `upstream_regulat
 ```bibtex
 @article{white2026causalatlas,
   author  = {Bryan P. White},
-  title   = {Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal},
+  title   = {Causal-Atlas: Tracing How Genes and Drugs Turn Biological Pathways On and Off},
   year    = {2026},
   journal = {CRV Science Apps Preprints},
   note    = {APP-PREPRINT-04, v0.2.0},

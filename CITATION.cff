@@ -27,7 +27,7 @@ keywords:
   - rust
 preferred-citation:
   type: article
-  title: "Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal"
+  title: "Causal-Atlas: Tracing How Genes and Drugs Turn Biological Pathways On and Off"
   authors:
     - family-names: "White"
       given-names: "Bryan P."
