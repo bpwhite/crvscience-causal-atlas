@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use Causal Atlas in your research, please cite the software and its CRV Science Apps preprint below."
+title: "Causal Atlas"
+version: "0.2.0"
+date-released: "2026-11-14"
+doi: "10.5281/zenodo.24222376"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.24222376"
+    description: "Zenodo Concept DOI for CRV Science Apps Preprint APP-PREPRINT-04"
+license:
+  - MIT
+  - Apache-2.0
+repository-code: "https://github.com/bpwhite/crvscience-causal-atlas"
+url: "https://crvscience.com/apps"
+authors:
+  - family-names: "White"
+    given-names: "Bryan P."
+    affiliation: "CRV Science Labs"
+keywords:
+  - causal-inference
+  - pathway-analysis
+  - upstream-regulator-analysis
+  - transcriptomics
+  - perturbation-reversal
+  - bioinformatics
+  - rust
+preferred-citation:
+  type: article
+  title: "Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal"
+  authors:
+    - family-names: "White"
+      given-names: "Bryan P."
+      affiliation: "CRV Science Labs"
+  doi: "10.5281/zenodo.24222376"
+  url: "https://crvscience.com/apps/preprints/causal-atlas-pathway-perturbation"
+  collection-title: "CRV Science Apps Preprints"
+  year: 2026
+  notes: "APP-PREPRINT-04"

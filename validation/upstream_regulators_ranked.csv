@@ -1,0 +1,14 @@
+rank,regulator_id,regulator_name,kind,predicted_state,activation_z,bias_corrected_z,skew_flagged,overlap_count,regulon_size,fisher_p_value,bh_fdr,observed_log2fc,mechanistic_summary
+1,TNF,Tumor Necrosis Factor,Cytokine,Activated,4.470297,3.101888,true,20,20,2.284125e-11,2.969363e-10,NA,20 targets (2 regulators)
+2,NFKB1,Nuclear Factor Kappa B Subunit 1 (p50/RelA),TranscriptionRegulator,Activated,3.996884,2.050358,true,16,16,3.417051e-8,2.221083e-7,NA,
+3,RELA,"RELA Proto-Oncogene, NF-kB Subunit",TranscriptionRegulator,Activated,3.159473,1.905234,true,10,10,8.953606e-5,3.879896e-4,NA,
+4,LPS,Lipopolysaccharide (TLR4 Agonist),ChemicalDrug,Activated,2.827888,1.450676,true,8,8,7.700101e-4,2.502533e-3,NA,17 targets (2 regulators)
+5,DEXAMETHASONE,Dexamethasone,ChemicalDrug,Inhibited,-2.644962,-1.356837,true,7,7,2.117528e-3,5.505572e-3,NA,
+6,IFNG,Interferon Gamma,Cytokine,Activated,2.234670,1.146361,true,5,5,1.432445e-2,3.103632e-2,NA,5 targets (2 regulators)
+7,KLF2,Kruppel Like Factor 2,TranscriptionRegulator,Unresolved,-1.999637,-1.999637,false,4,4,3.543417e-2,5.758053e-2,-2.3800,
+8,STAT1,Signal Transducer and Activator of Transcription 1,TranscriptionRegulator,Unresolved,1.998199,1.025055,true,4,4,3.543417e-2,5.758053e-2,1.9200,
+9,CTNNB1,Catenin Beta 1 (beta-Catenin),TranscriptionRegulator,Unresolved,1.731904,1.282529,true,3,8,8.026640e-1,9.984611e-1,NA,
+10,FULVESTRANT,Fulvestrant (SERD),ChemicalDrug,Unresolved,-1.414214,-0.938083,true,2,6,8.535670e-1,9.984611e-1,NA,
+11,ESTRADIOL,17beta-Estradiol,ChemicalDrug,Unresolved,1.414194,0.852791,true,2,10,9.865405e-1,9.984611e-1,NA,
+12,NCOA3,Nuclear Receptor Coactivator 3 (SRC-3),TranscriptionRegulator,Unresolved,1.414191,0.725465,true,2,4,6.165546e-1,8.905789e-1,NA,
+13,ESR1,Estrogen Receptor 1 (ER-alpha),TranscriptionRegulator,Unresolved,0.642809,0.270790,false,3,16,9.984611e-1,9.984611e-1,NA,

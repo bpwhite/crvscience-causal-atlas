@@ -43,3 +43,34 @@ cargo run --release -p ca-app -- --db causal_atlas.sqlite3 download-all --force
 # 5. Run cached CLI Core Analysis on a DESeq2 / edgeR TSV file
 cargo run --release -p ca-app -- --db causal_atlas.sqlite3 analyze --input examples/tnf_huvec_deg.tsv --output report.json
 ```
+
+## Headless Validation
+
+Run the headless DRY-lab validation suite across differential expression BH/Wald calibration, Krämer signed Upstream Regulator Z-scoring, multi-hop Causal Network Analysis, and CMap perturbation reversal:
+
+```bash
+cargo test -p ca-core --test headless_validation -- --nocapture
+```
+
+Validation outputs (`causal_atlas_validation_summary.json` and `upstream_regulators_ranked.csv`) are documented in [`validation/README.md`](validation/README.md).
+
+## Citation & CRV Science Apps Hub
+
+- **CRV Science Apps Hub**: <https://crvscience.com/apps>
+- **Preprint (`APP-PREPRINT-04`)**: [Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal](https://crvscience.com/apps/preprints/causal-atlas-pathway-perturbation)
+- **Concept DOI**: [`10.5281/zenodo.24222376`](https://doi.org/10.5281/zenodo.24222376)
+
+```bibtex
+@article{white2026causalatlas,
+  author  = {Bryan P. White},
+  title   = {Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal},
+  year    = {2026},
+  journal = {CRV Science Apps Preprints},
+  note    = {APP-PREPRINT-04, v0.2.0},
+  doi     = {10.5281/zenodo.24222376},
+  url     = {https://crvscience.com/apps/preprints/causal-atlas-pathway-perturbation}
+}
+```
+
+See [`CITATION.cff`](CITATION.cff) for machine-readable citation metadata.
+

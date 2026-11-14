@@ -1,0 +1,458 @@
+{
+  "schema_version": "1.0.0",
+  "repository": "crvscience-causal-atlas",
+  "version": "0.2.0",
+  "preprint_id": "APP-PREPRINT-04",
+  "concept_doi": "10.5281/zenodo.24222376",
+  "validation_mode": "headless_real_rust_ca_core",
+  "t1_differential_expression": {
+    "cohort_name": "HUVEC + TNF Inflammatory Cascade",
+    "tsv_example_rows": 26,
+    "total_measured_genes": 28,
+    "mapped_to_knowledge_graph": 26,
+    "active_degs_cohort_fdr": 24,
+    "active_degs_bh_recalibrated": 24,
+    "upregulated_count": 19,
+    "downregulated_count": 5,
+    "filtered_non_significant_housekeeping": [
+      "GAPDH",
+      "ACTB",
+      "TFF1",
+      "GREB1"
+    ],
+    "mean_sign_skew": 0.5833333333333334,
+    "bh_monotonicity_verified": true,
+    "wald_two_sided_p_calibration_max_abs_diff_log10": 3.552713678800501e-15,
+    "top_degs_sample": [
+      {
+        "symbol": "ICAM1",
+        "log2_fc": 4.35,
+        "p_value": 1.2e-18,
+        "cohort_fdr": 8e-17,
+        "bh_recalibrated_q": 8.4e-18,
+        "implied_wald_abs_z": 8.816245972922598,
+        "z_to_p_roundtrip": 1.2000000000000123e-18
+      },
+      {
+        "symbol": "VCAM1",
+        "log2_fc": 4.82,
+        "p_value": 3.5e-20,
+        "cohort_fdr": 4.1e-18,
+        "bh_recalibrated_q": 4.9e-19,
+        "implied_wald_abs_z": 9.204086210823622,
+        "z_to_p_roundtrip": 3.4999999999999844e-20
+      },
+      {
+        "symbol": "SELE",
+        "log2_fc": 5.1,
+        "p_value": 1.1e-21,
+        "cohort_fdr": 2e-19,
+        "bh_recalibrated_q": 3.08e-20,
+        "implied_wald_abs_z": 9.56884515345726,
+        "z_to_p_roundtrip": 1.0999999999999976e-21
+      },
+      {
+        "symbol": "CCL2",
+        "log2_fc": 3.95,
+        "p_value": 2.4e-15,
+        "cohort_fdr": 9.5e-14,
+        "bh_recalibrated_q": 1.3439999999999999e-14,
+        "implied_wald_abs_z": 7.919930876876357,
+        "z_to_p_roundtrip": 2.400000000000009e-15
+      },
+      {
+        "symbol": "CXCL8",
+        "log2_fc": 4.6,
+        "p_value": 4e-19,
+        "cohort_fdr": 3.2e-17,
+        "bh_recalibrated_q": 3.733333333333333e-18,
+        "implied_wald_abs_z": 8.93854888964174,
+        "z_to_p_roundtrip": 3.9999999999999546e-19
+      },
+      {
+        "symbol": "CXCL10",
+        "log2_fc": 3.74,
+        "p_value": 8.2e-14,
+        "cohort_fdr": 2.1e-12,
+        "bh_recalibrated_q": 3.2799999999999997e-13,
+        "implied_wald_abs_z": 7.468139379383674,
+        "z_to_p_roundtrip": 8.199999999999981e-14
+      },
+      {
+        "symbol": "IL6",
+        "log2_fc": 3.88,
+        "p_value": 1.9e-14,
+        "cohort_fdr": 6e-13,
+        "bh_recalibrated_q": 8.866666666666668e-14,
+        "implied_wald_abs_z": 7.658356327035545,
+        "z_to_p_roundtrip": 1.90000000000001e-14
+      },
+      {
+        "symbol": "IL1B",
+        "log2_fc": 3.12,
+        "p_value": 6.5e-11,
+        "cohort_fdr": 1.1e-9,
+        "bh_recalibrated_q": 2.022222222222222e-10,
+        "implied_wald_abs_z": 6.53251317041274,
+        "z_to_p_roundtrip": 6.499999999999965e-11
+      },
+      {
+        "symbol": "KLF2",
+        "log2_fc": -2.38,
+        "p_value": 1.1e-7,
+        "cohort_fdr": 9.5e-7,
+        "bh_recalibrated_q": 1.811764705882353e-7,
+        "implied_wald_abs_z": 5.309760851072099,
+        "z_to_p_roundtrip": 1.0999999999999929e-7
+      },
+      {
+        "symbol": "GAPDH",
+        "log2_fc": 0.08,
+        "p_value": 0.74,
+        "cohort_fdr": 0.89,
+        "bh_recalibrated_q": 0.7674074074074073,
+        "implied_wald_abs_z": 0.3318535265519851,
+        "z_to_p_roundtrip": 0.7400000000000001
+      }
+    ]
+  },
+  "t2_upstream_regulators": {
+    "total_regulators_scored": 13,
+    "significant_activated_count": 5,
+    "significant_inhibited_count": 1,
+    "csv_output_path": "validation/upstream_regulators_ranked.csv",
+    "csv_bytes": 1862,
+    "top_regulators": [
+      {
+        "rank": 1,
+        "regulator_id": "TNF",
+        "regulator_name": "Tumor Necrosis Factor",
+        "kind": "Cytokine",
+        "predicted_state": "Activated",
+        "activation_z": 4.4702967050945235,
+        "bias_corrected_z": 3.101888219506917,
+        "overlap_count": 20,
+        "regulon_size": 20,
+        "fisher_p_value": 2.284125163191927e-11,
+        "bh_fdr": 2.969362712149505e-10,
+        "mechanistic_summary": "20 targets (2 regulators)"
+      },
+      {
+        "rank": 2,
+        "regulator_id": "NFKB1",
+        "regulator_name": "Nuclear Factor Kappa B Subunit 1 (p50/RelA)",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Activated",
+        "activation_z": 3.9968836729385604,
+        "bias_corrected_z": 2.050358062118781,
+        "overlap_count": 16,
+        "regulon_size": 16,
+        "fisher_p_value": 3.4170512441351333e-8,
+        "bh_fdr": 2.2210833086878367e-7,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 3,
+        "regulator_id": "RELA",
+        "regulator_name": "RELA Proto-Oncogene, NF-kB Subunit",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Activated",
+        "activation_z": 3.159472817014229,
+        "bias_corrected_z": 1.905233794429709,
+        "overlap_count": 10,
+        "regulon_size": 10,
+        "fisher_p_value": 0.00008953606182700585,
+        "bh_fdr": 0.00038798960125035873,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 4,
+        "regulator_id": "LPS",
+        "regulator_name": "Lipopolysaccharide (TLR4 Agonist)",
+        "kind": "ChemicalDrug",
+        "predicted_state": "Activated",
+        "activation_z": 2.82788817355144,
+        "bias_corrected_z": 1.450676024090701,
+        "overlap_count": 8,
+        "regulon_size": 8,
+        "fisher_p_value": 0.0007700101317122424,
+        "bh_fdr": 0.002502532928064788,
+        "mechanistic_summary": "17 targets (2 regulators)"
+      },
+      {
+        "rank": 5,
+        "regulator_id": "DEXAMETHASONE",
+        "regulator_name": "Dexamethasone",
+        "kind": "ChemicalDrug",
+        "predicted_state": "Inhibited",
+        "activation_z": -2.6449616222270524,
+        "bias_corrected_z": -1.3568366832504937,
+        "overlap_count": 7,
+        "regulon_size": 7,
+        "fisher_p_value": 0.002117527862208678,
+        "bh_fdr": 0.005505572441742562,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 6,
+        "regulator_id": "IFNG",
+        "regulator_name": "Interferon Gamma",
+        "kind": "Cytokine",
+        "predicted_state": "Activated",
+        "activation_z": 2.23466981462576,
+        "bias_corrected_z": 1.146361426932087,
+        "overlap_count": 5,
+        "regulon_size": 5,
+        "fisher_p_value": 0.014324453185529393,
+        "bh_fdr": 0.031036315235313684,
+        "mechanistic_summary": "5 targets (2 regulators)"
+      },
+      {
+        "rank": 7,
+        "regulator_id": "KLF2",
+        "regulator_name": "Kruppel Like Factor 2",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Unresolved",
+        "activation_z": -1.9996374319488632,
+        "bias_corrected_z": -1.9996374319488632,
+        "overlap_count": 4,
+        "regulon_size": 4,
+        "fisher_p_value": 0.03543417366946779,
+        "bh_fdr": 0.057580532212885165,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 8,
+        "regulator_id": "STAT1",
+        "regulator_name": "Signal Transducer and Activator of Transcription 1",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Unresolved",
+        "activation_z": 1.9981993283808366,
+        "bias_corrected_z": 1.0250546270349163,
+        "overlap_count": 4,
+        "regulon_size": 4,
+        "fisher_p_value": 0.03543417366946779,
+        "bh_fdr": 0.057580532212885165,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 9,
+        "regulator_id": "CTNNB1",
+        "regulator_name": "Catenin Beta 1 (beta-Catenin)",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Unresolved",
+        "activation_z": 1.7319036307145037,
+        "bias_corrected_z": 1.2825294206949942,
+        "overlap_count": 3,
+        "regulon_size": 8,
+        "fisher_p_value": 0.8026640443411255,
+        "bh_fdr": 0.9984610688439971,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 10,
+        "regulator_id": "FULVESTRANT",
+        "regulator_name": "Fulvestrant (SERD)",
+        "kind": "ChemicalDrug",
+        "predicted_state": "Unresolved",
+        "activation_z": -1.414213562373095,
+        "bias_corrected_z": -0.938083151964686,
+        "overlap_count": 2,
+        "regulon_size": 6,
+        "fisher_p_value": 0.8535669586983589,
+        "bh_fdr": 0.9984610688439971,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 11,
+        "regulator_id": "ESTRADIOL",
+        "regulator_name": "17beta-Estradiol",
+        "kind": "ChemicalDrug",
+        "predicted_state": "Unresolved",
+        "activation_z": 1.4141941798933284,
+        "bias_corrected_z": 0.8527911773473703,
+        "overlap_count": 2,
+        "regulon_size": 10,
+        "fisher_p_value": 0.9865404845758055,
+        "bh_fdr": 0.9984610688439971,
+        "mechanistic_summary": null
+      },
+      {
+        "rank": 12,
+        "regulator_id": "NCOA3",
+        "regulator_name": "Nuclear Receptor Coactivator 3 (SRC-3)",
+        "kind": "TranscriptionRegulator",
+        "predicted_state": "Unresolved",
+        "activation_z": 1.41419149407841,
+        "bias_corrected_z": 0.7254649293137045,
+        "overlap_count": 2,
+        "regulon_size": 4,
+        "fisher_p_value": 0.6165546218487378,
+        "bh_fdr": 0.8905788982259545,
+        "mechanistic_summary": null
+      }
+    ],
+    "esr1_contrast_tnf_activation_z": -1.7320306323712065,
+    "esr1_contrast_esr1_activation_z": 3.996635033290252
+  },
+  "t3_causal_paths_and_cmap": {
+    "tnf_mechanistic_network_regulators": [
+      "RELA",
+      "TNF"
+    ],
+    "tnf_mechanistic_edges_count": 1,
+    "tnf_connected_dataset_genes_count": 20,
+    "tnf_causal_networks_count": 25,
+    "tnf_top_causal_paths": [
+      {
+        "root_regulator": "TNF",
+        "max_depth_k": 2,
+        "predicted_state": "Activated",
+        "activation_z": 4.69041575982343,
+        "overlap_p_value": 1.4736291375431707e-13,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 22,
+        "intermediate_regulators": [
+          "NFKB1"
+        ],
+        "sample_path_nodes": [
+          "TNF",
+          "NFKB1",
+          "CCND1"
+        ],
+        "sample_path_net_sign": 1
+      },
+      {
+        "root_regulator": "TNF",
+        "max_depth_k": 1,
+        "predicted_state": "Activated",
+        "activation_z": 4.47213595499958,
+        "overlap_p_value": 2.284125163191927e-11,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 20,
+        "intermediate_regulators": [],
+        "sample_path_nodes": [
+          "TNF",
+          "SELE"
+        ],
+        "sample_path_net_sign": 1
+      },
+      {
+        "root_regulator": "DEXAMETHASONE",
+        "max_depth_k": 3,
+        "predicted_state": "Inhibited",
+        "activation_z": -4.123105625617661,
+        "overlap_p_value": 6.834102488270248e-9,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 17,
+        "intermediate_regulators": [
+          "NFKB1",
+          "NR3C1",
+          "RELA"
+        ],
+        "sample_path_nodes": [
+          "DEXAMETHASONE",
+          "NR3C1",
+          "NFKB1",
+          "VCAM1"
+        ],
+        "sample_path_net_sign": -1
+      },
+      {
+        "root_regulator": "IKBKB",
+        "max_depth_k": 2,
+        "predicted_state": "Activated",
+        "activation_z": 4.123105625617661,
+        "overlap_p_value": 6.834102488270248e-9,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 17,
+        "intermediate_regulators": [
+          "NFKB1",
+          "RELA"
+        ],
+        "sample_path_nodes": [
+          "IKBKB",
+          "NFKB1",
+          "SELE"
+        ],
+        "sample_path_net_sign": 1
+      },
+      {
+        "root_regulator": "LPS",
+        "max_depth_k": 2,
+        "predicted_state": "Activated",
+        "activation_z": 4.123105625617661,
+        "overlap_p_value": 6.834102488270248e-9,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 17,
+        "intermediate_regulators": [
+          "NFKB1"
+        ],
+        "sample_path_nodes": [
+          "LPS",
+          "NFKB1",
+          "SELE"
+        ],
+        "sample_path_net_sign": 1
+      },
+      {
+        "root_regulator": "MAP3K7",
+        "max_depth_k": 3,
+        "predicted_state": "Activated",
+        "activation_z": 4.123105625617661,
+        "overlap_p_value": 6.834102488270248e-9,
+        "network_bias_p_value": 0.000999000999000999,
+        "target_count": 17,
+        "intermediate_regulators": [
+          "IKBKB",
+          "NFKB1",
+          "RELA"
+        ],
+        "sample_path_nodes": [
+          "MAP3K7",
+          "IKBKB",
+          "NFKB1",
+          "SELE"
+        ],
+        "sample_path_net_sign": 1
+      }
+    ],
+    "sost_wnt_cohort_sost_log2fc": -0.35,
+    "sost_wnt_inferred_root_z": -4.123105625617661,
+    "sost_wnt_inferred_root_network_bias_p": 0.000999000999000999,
+    "perturbation_signatures_scored": 7,
+    "reversers_count": 2,
+    "mimickers_count": 1,
+    "top_reversers": [
+      {
+        "signature_id": "LINCS-CP-IKK16-002",
+        "perturbagen": "BMS-345541 (Selective IKK-beta Inhibitor)",
+        "mode": "Reverser (Candidate Antagonist)",
+        "connectivity_score": -93.83823529411765,
+        "mechanism_of_action": "Allosteric IKBKB inhibitor blocking NF-kB nuclear translocation",
+        "matched_up_count": 3,
+        "matched_down_count": 9
+      },
+      {
+        "signature_id": "LINCS-CP-DEX-001",
+        "perturbagen": "Dexamethasone",
+        "mode": "Reverser (Candidate Antagonist)",
+        "connectivity_score": -75.89495798319328,
+        "mechanism_of_action": "Glucocorticoid receptor (NR3C1) agonist; NF-kB transrepressor",
+        "matched_up_count": 3,
+        "matched_down_count": 10
+      }
+    ],
+    "top_mimickers": [
+      {
+        "signature_id": "LINCS-LIG-TNF-003",
+        "perturbagen": "Recombinant Human TNF-alpha",
+        "mode": "Mimicker (Concordant Agonist)",
+        "connectivity_score": 90.00000000000001,
+        "mechanism_of_action": "TNFRSF1A agonist activating canonical IKK/NF-kB & JNK",
+        "matched_up_count": 10,
+        "matched_down_count": 3
+      }
+    ]
+  }
+}
