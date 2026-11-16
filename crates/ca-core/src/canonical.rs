@@ -292,3 +292,22 @@ pub fn simulate_map(
         edge_flux,
     }
 }
+
+/// Molecule Activity Predictor (MAP) with automatic `KnowledgeGraph` causal edge induction
+/// so gene-set pathways (e.g. GMT imports) propagate activity across curated interactions.
+pub fn simulate_map_in_kg(
+    pathway: &PathwayDef,
+    active: &ActiveDataset,
+    kg: &KnowledgeGraph,
+    user_clamps: &BTreeMap<String, f64>,
+    damping: f64,
+    iterations: usize,
+) -> MapSimulationResult {
+    let induced = crate::layout::induce_pathway_topology_edges(pathway, kg);
+    if induced.len() == pathway.topology_edges.len() {
+        return simulate_map(pathway, active, user_clamps, damping, iterations);
+    }
+    let mut enriched = pathway.clone();
+    enriched.topology_edges = induced;
+    simulate_map(&enriched, active, user_clamps, damping, iterations)
+}

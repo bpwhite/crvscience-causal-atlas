@@ -36,6 +36,7 @@ pub mod cna;
 pub mod dataset;
 pub mod dea;
 pub mod graph;
+pub mod layout;
 pub mod perturb;
 pub mod seed_kb;
 pub mod stats;
@@ -44,7 +45,8 @@ pub mod ura;
 use serde::{Deserialize, Serialize};
 
 pub use canonical::{
-    run_canonical_pathways, simulate_map, CanonicalPathwayHit, MapNodeState, MapSimulationResult,
+    run_canonical_pathways, simulate_map, simulate_map_in_kg, CanonicalPathwayHit, MapNodeState,
+    MapSimulationResult,
 };
 pub use cna::{run_causal_networks, CausalNetworkHit, CausalPathHop};
 pub use dataset::{
@@ -58,6 +60,12 @@ pub use dea::{
 pub use graph::{
     CausalEdge, EdgeClass, EdgeSign, EntityKind, EntityNode, KnowledgeGraph, PathwayDef,
     PathwayReactionEdge, PerturbationKind, PerturbationSignature, SubcellularLocation,
+};
+pub use layout::{
+    compute_pathway_world_layout_cached, compute_pathway_world_layout_uncached,
+    compute_tiered_causal_layout, compute_world_canvas_size, induce_pathway_topology_edges,
+    recompute_and_cache_pathway_layout, resolve_normalized_pathway_coords, CompartmentBands,
+    PathwayWorldLayout, TieredNodeSpec, TieredWorldLayout, MIN_NODE_DX, MIN_NODE_DY,
 };
 pub use perturb::{
     run_comparison_analysis, run_perturbation_match, ComparisonMatrix, ComparisonMetric,

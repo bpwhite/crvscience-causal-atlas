@@ -17,14 +17,16 @@
 
 use crate::svg_export::{render_pathway_map_svg, render_treemap_svg};
 use crate::theme::{
-    apply_workbench_visuals, draw_directed_causal_edge, draw_dna_double_helix, draw_entity_glyph,
-    draw_phospho_badge, ScientificPalette, WorkbenchPaletteMode,
+    apply_workbench_visuals, draw_bezier_causal_edge, draw_dna_double_helix, draw_entity_glyph,
+    draw_gold_pulse_halo, draw_phospho_badge, ScientificPalette, WorkbenchPaletteMode,
 };
 use ca_core::{
-    build_mechanistic_network, builtin_cohorts, parse_expression_table, run_comparison_analysis,
-    run_core_analysis, seed_kb::build_seed_knowledge_graph, simulate_map, ComparisonMetric,
-    CoreAnalysisConfig, CoreAnalysisReport, EdgeSign, EntityKind, ExpressionDataset,
-    KnowledgeGraph, PredictedState, SubcellularLocation,
+    build_mechanistic_network, builtin_cohorts, compute_pathway_world_layout_cached,
+    compute_tiered_causal_layout, parse_expression_table, recompute_and_cache_pathway_layout,
+    run_comparison_analysis, run_core_analysis, seed_kb::build_seed_knowledge_graph,
+    simulate_map_in_kg, ComparisonMetric, CoreAnalysisConfig, CoreAnalysisReport, EdgeSign,
+    EntityKind, ExpressionDataset, KnowledgeGraph, PredictedState, SubcellularLocation,
+    TieredNodeSpec, MIN_NODE_DX, MIN_NODE_DY,
 };
 use ca_streams::{
     client::{fetch_remote_stream_conditional, import_local_stream_file},
@@ -33,7 +35,7 @@ use ca_streams::{
     SqliteCacheStats, SqliteKnowledgeStore, StreamDescriptor,
 };
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -44,40 +46,44 @@ use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkbenchTab {
-    DatasetVolcano,
-    CanonicalPathwaysMap,
-    UpstreamRegulators,
-    CausalNetworksMultiHop,
-    DownstreamTreeMap,
-    RegulatorEffectsFlow,
-    ComparisonAndPerturb,
-    OpenDataStreams,
+    CohortVolcano,
+    PathwayAtlas,
+    CausalRegulators,
+    PhenotypeDrugMatch,
+    KnowledgeDatabases,
 }
 
 impl WorkbenchTab {
-    pub const ALL: [Self; 8] = [
-        Self::DatasetVolcano,
-        Self::CanonicalPathwaysMap,
-        Self::UpstreamRegulators,
-        Self::CausalNetworksMultiHop,
-        Self::DownstreamTreeMap,
-        Self::RegulatorEffectsFlow,
-        Self::ComparisonAndPerturb,
-        Self::OpenDataStreams,
+    pub const ALL: [Self; 5] = [
+        Self::CohortVolcano,
+        Self::PathwayAtlas,
+        Self::CausalRegulators,
+        Self::PhenotypeDrugMatch,
+        Self::KnowledgeDatabases,
     ];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::DatasetVolcano => "1. Dataset & Volcano",
-            Self::CanonicalPathwaysMap => "2. Canonical Pathways & MAP",
-            Self::UpstreamRegulators => "3. Upstream Regulators",
-            Self::CausalNetworksMultiHop => "4. Causal Networks (Multi-Hop)",
-            Self::DownstreamTreeMap => "5. Downstream TreeMap",
-            Self::RegulatorEffectsFlow => "6. Regulator Effects",
-            Self::ComparisonAndPerturb => "7. Comparison & Reversers",
-            Self::OpenDataStreams => "8. Streams & SQLite Cache",
+            Self::CohortVolcano => "1. Cohort & Volcano",
+            Self::PathwayAtlas => "2. Pathway Atlas",
+            Self::CausalRegulators => "3. Causal Regulators",
+            Self::PhenotypeDrugMatch => "4. Phenotype & Drug Match",
+            Self::KnowledgeDatabases => "5. Knowledge Databases",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CausalRegulatorsSubTab {
+    UpstreamRegulators,
+    MultiHopNetworks,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhenotypeDrugSubTab {
+    ComparisonAndReversers,
+    DownstreamTreeMap,
+    RegulatorEffectsFlow,
 }
 
 enum WorkerMessage {
@@ -126,12 +132,23 @@ enum GuiAction {
     SetComparisonMetric(ComparisonMetric),
     TogglePalette,
     TogglePathwayFullscreen,
-    ResetPathwayViewport,
+    ToggleSidebarHidden,
+    FitPathwayViewport,
+    CenterSelectedPathwayNode,
+    RelayoutActivePathway,
+    TogglePathwayEgoFilter,
+    UnpinPathwayNodes(String),
+    JumpToGene {
+        symbol: String,
+        pathway_id: Option<String>,
+    },
 }
 
 pub struct CausalAtlasApp {
     palette_mode: WorkbenchPaletteMode,
     active_tab: WorkbenchTab,
+    causal_subtab: CausalRegulatorsSubTab,
+    phenotype_subtab: PhenotypeDrugSubTab,
     db_path: PathBuf,
     db: SqliteKnowledgeStore,
     db_stats: SqliteCacheStats,
@@ -144,21 +161,50 @@ pub struct CausalAtlasApp {
     config: CoreAnalysisConfig,
     reports: Vec<CoreAnalysisReport>,
 
+    // Global Gene/Protein Omnibox (Ctrl+F) & Context Strip
+    omnibox_query: String,
+    omnibox_dropdown_open: bool,
+    omnibox_focus_requested: bool,
+    omnibox_selected_gene: Option<String>,
+    highlight_pulse_gene: Option<String>,
+    highlight_pulse_timer: f32,
+
     gene_search: String,
     pathway_search: String,
     regulator_search: String,
     selected_pathway_idx: usize,
+    override_pathway_id: Option<String>,
     selected_pathway_node: Option<String>,
     map_user_clamps: BTreeMap<String, f64>,
     selected_ura_idx: usize,
     mechanistic_node_offsets: BTreeMap<String, Vec2>,
+    dragging_ura_node: Option<String>,
+    ura_zoom: f32,
+    ura_pan: Vec2,
+    ura_fit_pending: bool,
     selected_cna_idx: usize,
     selected_dea_term: Option<String>,
     selected_reg_effect_idx: usize,
+    re_node_offsets: BTreeMap<String, Vec2>,
+    dragging_re_node: Option<String>,
+    re_zoom: f32,
+    re_pan: Vec2,
+    re_fit_pending: bool,
     comparison_metric: ComparisonMetric,
     pathway_fullscreen: bool,
+    sidebar_hidden: bool,
     pathway_zoom: f32,
     pathway_pan: Vec2,
+    pathway_fit_pending: bool,
+    pathway_ego_filter: bool,
+    dragging_pathway_node: Option<String>,
+    pinned_pathway_nodes: BTreeMap<String, BTreeMap<String, Pos2>>,
+    camera_pan_pending_node: Option<String>,
+    camera_anim_start_pan: Vec2,
+    camera_anim_target_pan: Vec2,
+    camera_anim_start_zoom: f32,
+    camera_anim_target_zoom: f32,
+    camera_anim_progress: f32,
 
     batch_progress_fraction: f32,
     batch_progress_label: String,
@@ -222,7 +268,9 @@ impl CausalAtlasApp {
 
         Self {
             palette_mode,
-            active_tab: WorkbenchTab::CanonicalPathwaysMap,
+            active_tab: WorkbenchTab::PathwayAtlas,
+            causal_subtab: CausalRegulatorsSubTab::UpstreamRegulators,
+            phenotype_subtab: PhenotypeDrugSubTab::ComparisonAndReversers,
             db_path,
             db,
             db_stats: db_stats.clone(),
@@ -234,21 +282,48 @@ impl CausalAtlasApp {
             active_cohort_idx: 0,
             config,
             reports,
+            omnibox_query: String::new(),
+            omnibox_dropdown_open: false,
+            omnibox_focus_requested: false,
+            omnibox_selected_gene: None,
+            highlight_pulse_gene: None,
+            highlight_pulse_timer: 0.0,
             gene_search: String::new(),
             pathway_search: String::new(),
             regulator_search: String::new(),
             selected_pathway_idx: 0,
+            override_pathway_id: None,
             selected_pathway_node: None,
             map_user_clamps: BTreeMap::new(),
             selected_ura_idx: 0,
             mechanistic_node_offsets: BTreeMap::new(),
+            dragging_ura_node: None,
+            ura_zoom: 1.0,
+            ura_pan: Vec2::ZERO,
+            ura_fit_pending: true,
             selected_cna_idx: 0,
             selected_dea_term: None,
             selected_reg_effect_idx: 0,
+            re_node_offsets: BTreeMap::new(),
+            dragging_re_node: None,
+            re_zoom: 1.0,
+            re_pan: Vec2::ZERO,
+            re_fit_pending: true,
             comparison_metric: ComparisonMetric::UpstreamRegulatorsZ,
             pathway_fullscreen: false,
+            sidebar_hidden: false,
             pathway_zoom: 1.0,
             pathway_pan: Vec2::ZERO,
+            pathway_fit_pending: true,
+            pathway_ego_filter: false,
+            dragging_pathway_node: None,
+            pinned_pathway_nodes: BTreeMap::new(),
+            camera_pan_pending_node: None,
+            camera_anim_start_pan: Vec2::ZERO,
+            camera_anim_target_pan: Vec2::ZERO,
+            camera_anim_start_zoom: 1.0,
+            camera_anim_target_zoom: 1.0,
+            camera_anim_progress: 1.0,
             batch_progress_fraction: 0.0,
             batch_progress_label: "Idle — SQLite WAL cache ready".to_string(),
             sync_logs: vec![format!(
@@ -428,20 +503,38 @@ impl CausalAtlasApp {
         self.selected_reg_effect_idx = 0;
     }
 
+    fn active_pathway_id(&self) -> Option<String> {
+        if let Some(ref oid) = self.override_pathway_id {
+            if self.kg.pathways.iter().any(|p| &p.id == oid) {
+                return Some(oid.clone());
+            }
+        }
+        let rep = &self.reports[self.active_cohort_idx];
+        rep.canonical_pathways
+            .get(self.selected_pathway_idx)
+            .map(|h| h.pathway_id.clone())
+            .or_else(|| self.kg.pathways.first().map(|p| p.id.clone()))
+    }
+
     fn apply_action(&mut self, ctx: &egui::Context, action: GuiAction) {
         match action {
             GuiAction::OpenStreamsTab => {
-                self.active_tab = WorkbenchTab::OpenDataStreams;
+                self.active_tab = WorkbenchTab::KnowledgeDatabases;
             }
             GuiAction::SelectCohort(idx) => {
                 if idx < self.cohorts.len() {
                     self.active_cohort_idx = idx;
                     self.selected_pathway_idx = 0;
+                    self.override_pathway_id = None;
                     self.selected_ura_idx = 0;
                     self.selected_cna_idx = 0;
                     self.selected_reg_effect_idx = 0;
                     self.map_user_clamps.clear();
                     self.mechanistic_node_offsets.clear();
+                    self.re_node_offsets.clear();
+                    self.pathway_fit_pending = true;
+                    self.ura_fit_pending = true;
+                    self.re_fit_pending = true;
                 }
             }
             GuiAction::RecomputeActive => {
@@ -595,22 +688,17 @@ impl CausalAtlasApp {
                 }
             }
             GuiAction::ExportPathwaySvgDialog => {
-                let rep = self.current_report();
-                if let Some(pw_hit) = rep.canonical_pathways.get(self.selected_pathway_idx) {
-                    if let Some(pw_def) = self
-                        .kg
-                        .pathways
-                        .iter()
-                        .find(|p| p.id == pw_hit.pathway_id)
-                    {
+                if let Some(pw_id) = self.active_pathway_id() {
+                    if let Some(pw_def) = self.kg.pathways.iter().find(|p| p.id == pw_id) {
                         let active = self.cohorts[self.active_cohort_idx].filter_active(
                             self.config.abs_log2fc_cutoff,
                             self.config.fdr_cutoff,
                             &self.kg,
                         );
-                        let map_res = simulate_map(
+                        let map_res = simulate_map_in_kg(
                             pw_def,
                             &active,
+                            &self.kg,
                             &self.map_user_clamps,
                             self.config.map_damping,
                             self.config.map_iterations,
@@ -726,12 +814,15 @@ impl CausalAtlasApp {
             }
             GuiAction::SelectPathway(idx) => {
                 self.selected_pathway_idx = idx;
+                self.override_pathway_id = None;
                 self.selected_pathway_node = None;
-                self.pathway_zoom = 1.0;
-                self.pathway_pan = Vec2::ZERO;
+                self.pathway_fit_pending = true;
+                self.camera_anim_progress = 1.0;
+                self.camera_pan_pending_node = None;
             }
             GuiAction::SelectPathwayNode(nid) => {
-                self.selected_pathway_node = Some(nid);
+                self.selected_pathway_node = Some(nid.clone());
+                self.omnibox_selected_gene = Some(nid);
             }
             GuiAction::SetNodeClamp(nid, val) => {
                 if let Some(v) = val {
@@ -746,6 +837,7 @@ impl CausalAtlasApp {
             GuiAction::SelectUraIndex(idx) => {
                 self.selected_ura_idx = idx;
                 self.mechanistic_node_offsets.clear();
+                self.ura_fit_pending = true;
             }
             GuiAction::SelectCnaIndex(idx) => {
                 self.selected_cna_idx = idx;
@@ -755,16 +847,124 @@ impl CausalAtlasApp {
             }
             GuiAction::SelectRegEffectIndex(idx) => {
                 self.selected_reg_effect_idx = idx;
+                self.re_node_offsets.clear();
+                self.re_fit_pending = true;
             }
             GuiAction::SetComparisonMetric(m) => {
                 self.comparison_metric = m;
             }
             GuiAction::TogglePathwayFullscreen => {
                 self.pathway_fullscreen = !self.pathway_fullscreen;
+                self.pathway_fit_pending = true;
             }
-            GuiAction::ResetPathwayViewport => {
-                self.pathway_zoom = 1.0;
-                self.pathway_pan = Vec2::ZERO;
+            GuiAction::ToggleSidebarHidden => {
+                self.sidebar_hidden = !self.sidebar_hidden;
+            }
+            GuiAction::FitPathwayViewport => {
+                self.pathway_fit_pending = true;
+                self.camera_anim_progress = 1.0;
+                self.camera_pan_pending_node = None;
+            }
+            GuiAction::CenterSelectedPathwayNode => {
+                let target = self
+                    .selected_pathway_node
+                    .clone()
+                    .or_else(|| self.omnibox_selected_gene.clone());
+                if let Some(nid) = target {
+                    self.camera_pan_pending_node = Some(nid.clone());
+                    self.highlight_pulse_gene = Some(nid);
+                    self.highlight_pulse_timer = 2.8;
+                } else {
+                    self.pathway_fit_pending = true;
+                }
+            }
+            GuiAction::RelayoutActivePathway => {
+                if let Some(pw_id) = self.active_pathway_id() {
+                    self.pinned_pathway_nodes.remove(&pw_id);
+                    if let Some(pw_def) = self.kg.pathways.iter().find(|p| p.id == pw_id) {
+                        recompute_and_cache_pathway_layout(pw_def, &self.kg);
+                    }
+                    self.pathway_fit_pending = true;
+                    self.status_banner = format!(
+                        "Recomputed 120-iteration radiative compartment layout for {pw_id}"
+                    );
+                }
+            }
+            GuiAction::TogglePathwayEgoFilter => {
+                self.pathway_ego_filter = !self.pathway_ego_filter;
+                if self.pathway_ego_filter && self.selected_pathway_node.is_none() {
+                    if let Some(pw_id) = self.active_pathway_id() {
+                        if let Some(pw_def) = self.kg.pathways.iter().find(|p| p.id == pw_id) {
+                            let wl = compute_pathway_world_layout_cached(pw_def, &self.kg);
+                            let mut deg: BTreeMap<&str, usize> = BTreeMap::new();
+                            for e in &wl.edges {
+                                *deg.entry(e.from.as_str()).or_insert(0) += 1;
+                                *deg.entry(e.to.as_str()).or_insert(0) += 1;
+                            }
+                            if let Some((best, _)) = deg
+                                .into_iter()
+                                .max_by_key(|&(_, d)| d)
+                                .or_else(|| wl.positions.keys().next().map(|k| (k.as_str(), 0)))
+                            {
+                                self.selected_pathway_node = Some(best.to_string());
+                                self.omnibox_selected_gene = Some(best.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            GuiAction::UnpinPathwayNodes(pw_id) => {
+                self.pinned_pathway_nodes.remove(&pw_id);
+            }
+            GuiAction::JumpToGene { symbol, pathway_id } => {
+                let sym = symbol.trim().to_uppercase();
+                self.omnibox_selected_gene = Some(sym.clone());
+                self.omnibox_dropdown_open = false;
+                self.highlight_pulse_gene = Some(sym.clone());
+                self.highlight_pulse_timer = 3.2;
+
+                let chosen_pw = pathway_id.or_else(|| {
+                    let rep = &self.reports[self.active_cohort_idx];
+                    for hit in &rep.canonical_pathways {
+                        if let Some(pw) = self.kg.pathways.iter().find(|p| p.id == hit.pathway_id) {
+                            if pw.members.iter().any(|m| m == &sym)
+                                || pw.topology_edges.iter().any(|e| e.from == sym || e.to == sym)
+                            {
+                                return Some(pw.id.clone());
+                            }
+                        }
+                    }
+                    self.kg
+                        .pathways
+                        .iter()
+                        .find(|pw| {
+                            pw.members.iter().any(|m| m == &sym)
+                                || pw.topology_edges.iter().any(|e| e.from == sym || e.to == sym)
+                        })
+                        .map(|p| p.id.clone())
+                });
+
+                if let Some(pw_id) = chosen_pw {
+                    let rep_idx = self.reports[self.active_cohort_idx]
+                        .canonical_pathways
+                        .iter()
+                        .position(|p| p.pathway_id == pw_id);
+                    if let Some(idx) = rep_idx {
+                        self.selected_pathway_idx = idx;
+                        self.override_pathway_id = None;
+                    } else {
+                        self.override_pathway_id = Some(pw_id.clone());
+                    }
+                    self.active_tab = WorkbenchTab::PathwayAtlas;
+                    self.selected_pathway_node = Some(sym.clone());
+                    self.camera_pan_pending_node = Some(sym.clone());
+                    self.status_banner = format!("Focused {sym} inside Pathway {pw_id}");
+                } else {
+                    self.active_tab = WorkbenchTab::CohortVolcano;
+                    self.gene_search = sym.clone();
+                    self.status_banner =
+                        format!("Highlighted {sym} in Cohort Differential Expression table");
+                }
             }
             GuiAction::TogglePalette => {
                 self.palette_mode = match self.palette_mode {
@@ -796,17 +996,57 @@ impl CausalAtlasApp {
             ctx,
             GuiAction::SetComparisonMetric(ComparisonMetric::UpstreamRegulatorsZ),
         );
-        self.active_tab = match view {
-            2 => WorkbenchTab::CanonicalPathwaysMap,
-            3 => WorkbenchTab::UpstreamRegulators,
-            _ => WorkbenchTab::ComparisonAndPerturb,
-        };
+        self.sidebar_hidden = false;
+        self.pathway_fullscreen = false;
+        self.pathway_ego_filter = false;
+        self.pathway_fit_pending = true;
+        self.ura_fit_pending = true;
+        self.re_fit_pending = true;
+        match view {
+            2 => {
+                self.active_tab = WorkbenchTab::PathwayAtlas;
+                self.selected_pathway_idx = 0;
+                self.override_pathway_id = None;
+                self.selected_pathway_node = Some("VCAM1".to_string());
+                self.omnibox_selected_gene = Some("VCAM1".to_string());
+                self.highlight_pulse_gene = Some("VCAM1".to_string());
+                self.highlight_pulse_timer = 2.0;
+            }
+            3 => {
+                self.active_tab = WorkbenchTab::CausalRegulators;
+                self.causal_subtab = CausalRegulatorsSubTab::UpstreamRegulators;
+                self.omnibox_selected_gene = Some("TNF".to_string());
+            }
+            _ => {
+                self.active_tab = WorkbenchTab::PhenotypeDrugMatch;
+                self.phenotype_subtab = PhenotypeDrugSubTab::ComparisonAndReversers;
+            }
+        }
     }
 
     pub fn render_ui_frame(&mut self, ctx: &egui::Context) {
         self.poll_worker();
+        let dt = ctx.input(|i| i.unstable_dt).clamp(0.001, 0.05);
+        if self.highlight_pulse_timer > 0.0 {
+            self.highlight_pulse_timer = (self.highlight_pulse_timer - dt).max(0.0);
+            if self.highlight_pulse_timer > 0.0 {
+                ctx.request_repaint();
+            }
+        }
+        if self.camera_anim_progress < 1.0 {
+            ctx.request_repaint();
+        }
         if self.worker_busy {
             ctx.request_repaint();
+        }
+
+        // Global Ctrl+F / Cmd+F shortcut to focus Omnibox
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F)) {
+            self.omnibox_focus_requested = true;
+            self.omnibox_dropdown_open = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.omnibox_dropdown_open = false;
         }
 
         let pal = ScientificPalette::for_mode(self.palette_mode);
@@ -851,6 +1091,8 @@ impl CausalAtlasApp {
                     actions.push(GuiAction::TogglePalette);
                 }
             });
+            ui.separator();
+            self.render_global_omnibox_and_context_strip(ctx, ui, &pal, &mut actions);
             ui.add_space(3.0);
         });
 
@@ -875,161 +1117,507 @@ impl CausalAtlasApp {
             });
         });
 
-        egui::SidePanel::left("left_controls")
-            .resizable(true)
-            .default_width(275.0)
-            .min_width(235.0)
-            .show(ctx, |ui| {
-                ui.heading("Cohort & Cutoffs");
-                ui.add_space(4.0);
+        if !self.sidebar_hidden && !self.pathway_fullscreen {
+            egui::SidePanel::left("left_controls")
+                .resizable(true)
+                .default_width(250.0)
+                .min_width(220.0)
+                .max_width(320.0)
+                .show(ctx, |ui| {
+                    ui.heading("Cohort & Cutoffs");
+                    ui.add_space(4.0);
 
-                egui::ComboBox::from_label("Cohort")
-                    .selected_text(&self.cohorts[self.active_cohort_idx].name)
-                    .width(210.0)
-                    .show_ui(ui, |ui| {
-                        for (idx, ds) in self.cohorts.iter().enumerate() {
-                            if ui
-                                .selectable_label(self.active_cohort_idx == idx, &ds.name)
-                                .clicked()
-                            {
-                                actions.push(GuiAction::SelectCohort(idx));
+                    egui::ComboBox::from_label("Cohort")
+                        .selected_text(&self.cohorts[self.active_cohort_idx].name)
+                        .width(190.0)
+                        .show_ui(ui, |ui| {
+                            for (idx, ds) in self.cohorts.iter().enumerate() {
+                                if ui
+                                    .selectable_label(self.active_cohort_idx == idx, &ds.name)
+                                    .clicked()
+                                {
+                                    actions.push(GuiAction::SelectCohort(idx));
+                                }
                             }
+                        });
+
+                    ui.label(
+                        RichText::new(&self.cohorts[self.active_cohort_idx].description)
+                            .size(11.5)
+                            .color(pal.text_muted),
+                    );
+                    ui.add_space(6.0);
+
+                    if ui.button("Import Expression CSV / TSV...").clicked() {
+                        actions.push(GuiAction::ImportDatasetDialog);
+                    }
+
+                    ui.separator();
+                    ui.label(RichText::new("Differential Cutoffs").strong());
+                    let mut cutoff_changed = false;
+                    cutoff_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.abs_log2fc_cutoff, 0.25..=3.0)
+                                .text("|log2FC|"),
+                        )
+                        .changed();
+                    cutoff_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.fdr_cutoff, 0.0001..=0.25)
+                                .logarithmic(true)
+                                .text("Max FDR"),
+                        )
+                        .changed();
+                    cutoff_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.cna_max_depth, 1..=3)
+                                .text("CNA Hop K"),
+                        )
+                        .changed();
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Run Core Analysis").clicked() || cutoff_changed {
+                            actions.push(GuiAction::RecomputeActive);
+                        }
+                        if ui.button("Sync All Cohorts").clicked() {
+                            actions.push(GuiAction::RecomputeAllComparison);
                         }
                     });
 
-                ui.label(
-                    RichText::new(&self.cohorts[self.active_cohort_idx].description)
-                        .size(11.5)
-                        .color(pal.text_muted),
-                );
-                ui.add_space(6.0);
+                    ui.separator();
+                    let sum = &self.reports[self.active_cohort_idx].summary;
+                    ui.label(RichText::new("Analysis Molecule Summary").strong());
+                    egui::Grid::new("kpi_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Measured Rows:");
+                            ui.label(format!("{}", sum.total_measured));
+                            ui.end_row();
 
-                if ui.button("Import Expression CSV / TSV...").clicked() {
-                    actions.push(GuiAction::ImportDatasetDialog);
-                }
+                            ui.label("Mapped to KG:");
+                            ui.label(format!("{}", sum.mapped_to_graph));
+                            ui.end_row();
 
-                ui.separator();
-                ui.label(RichText::new("Differential Cutoffs").strong());
-                let mut cutoff_changed = false;
-                cutoff_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.abs_log2fc_cutoff, 0.25..=3.0)
-                            .text("|log2FC|"),
-                    )
-                    .changed();
-                cutoff_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.fdr_cutoff, 0.0001..=0.25)
-                            .logarithmic(true)
-                            .text("Max FDR"),
-                    )
-                    .changed();
-                cutoff_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.cna_max_depth, 1..=3)
-                            .text("CNA Hop K"),
-                    )
-                    .changed();
+                            ui.label("Analysis-Ready DEGs:");
+                            ui.label(RichText::new(format!("{}", sum.active_genes)).strong());
+                            ui.end_row();
 
-                ui.horizontal(|ui| {
-                    if ui.button("Run Core Analysis").clicked() || cutoff_changed {
-                        actions.push(GuiAction::RecomputeActive);
-                    }
-                    if ui.button("Sync All Cohorts").clicked() {
-                        actions.push(GuiAction::RecomputeAllComparison);
-                    }
-                });
+                            ui.label("Upregulated (+):");
+                            ui.label(
+                                RichText::new(format!("{}", sum.upregulated_count))
+                                    .color(pal.expr_up),
+                            );
+                            ui.end_row();
 
-                ui.separator();
-                let sum = &self.reports[self.active_cohort_idx].summary;
-                ui.label(RichText::new("Analysis Molecule Summary").strong());
-                egui::Grid::new("kpi_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Measured Rows:");
-                        ui.label(format!("{}", sum.total_measured));
-                        ui.end_row();
+                            ui.label("Downregulated (-):");
+                            ui.label(
+                                RichText::new(format!("{}", sum.downregulated_count))
+                                    .color(pal.expr_down),
+                            );
+                            ui.end_row();
 
-                        ui.label("Mapped to KG:");
-                        ui.label(format!("{}", sum.mapped_to_graph));
-                        ui.end_row();
+                            ui.label("Sign Skew (mu_2):");
+                            ui.label(format!("{:+.2}", sum.mean_sign_skew));
+                            ui.end_row();
+                        });
 
-                        ui.label("Analysis-Ready DEGs:");
-                        ui.label(RichText::new(format!("{}", sum.active_genes)).strong());
-                        ui.end_row();
-
-                        ui.label("Upregulated (+):");
-                        ui.label(
-                            RichText::new(format!("{}", sum.upregulated_count)).color(pal.expr_up),
-                        );
-                        ui.end_row();
-
-                        ui.label("Downregulated (-):");
-                        ui.label(
-                            RichText::new(format!("{}", sum.downregulated_count))
-                                .color(pal.expr_down),
-                        );
-                        ui.end_row();
-
-                        ui.label("Sign Skew (mu_2):");
-                        ui.label(format!("{:+.2}", sum.mean_sign_skew));
-                        ui.end_row();
+                    ui.separator();
+                    ui.label(RichText::new("Visual Legend").strong().size(12.5));
+                    ui.horizontal(|ui| {
+                        let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
+                        p.rect_filled(r.rect, 3.0, pal.activated_strong);
+                        ui.label(RichText::new("Predicted Activated (Z >= +2)").size(11.5));
                     });
-
-                ui.separator();
-                ui.label(RichText::new("Visual Legend").strong().size(12.5));
-                ui.horizontal(|ui| {
-                    let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
-                    p.rect_filled(r.rect, 3.0, pal.activated_strong);
-                    ui.label(RichText::new("Predicted Activated (Z >= +2)").size(11.5));
+                    ui.horizontal(|ui| {
+                        let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
+                        p.rect_filled(r.rect, 3.0, pal.inhibited_strong);
+                        ui.label(RichText::new("Predicted Inhibited (Z <= -2)").size(11.5));
+                    });
+                    ui.horizontal(|ui| {
+                        let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
+                        p.rect_filled(r.rect, 3.0, pal.expr_up);
+                        ui.label(RichText::new("Observed Upregulated mRNA").size(11.5));
+                    });
+                    ui.horizontal(|ui| {
+                        let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
+                        p.rect_filled(r.rect, 3.0, pal.expr_down);
+                        ui.label(RichText::new("Observed Downregulated mRNA").size(11.5));
+                    });
                 });
-                ui.horizontal(|ui| {
-                    let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
-                    p.rect_filled(r.rect, 3.0, pal.inhibited_strong);
-                    ui.label(RichText::new("Predicted Inhibited (Z <= -2)").size(11.5));
-                });
-                ui.horizontal(|ui| {
-                    let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
-                    p.rect_filled(r.rect, 3.0, pal.expr_up);
-                    ui.label(RichText::new("Observed Upregulated mRNA").size(11.5));
-                });
-                ui.horizontal(|ui| {
-                    let (r, p) = ui.allocate_painter(Vec2::new(14.0, 14.0), Sense::hover());
-                    p.rect_filled(r.rect, 3.0, pal.expr_down);
-                    ui.label(RichText::new("Observed Downregulated mRNA").size(11.5));
-                });
-            });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
-            WorkbenchTab::DatasetVolcano => {
+            WorkbenchTab::CohortVolcano => {
                 self.render_dataset_volcano_tab(ui, &pal);
             }
-            WorkbenchTab::CanonicalPathwaysMap => {
+            WorkbenchTab::PathwayAtlas => {
                 self.render_canonical_map_tab(ui, &pal, &mut actions);
             }
-            WorkbenchTab::UpstreamRegulators => {
-                self.render_ura_mechanistic_tab(ui, &pal, &mut actions);
+            WorkbenchTab::CausalRegulators => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(
+                            self.causal_subtab == CausalRegulatorsSubTab::UpstreamRegulators,
+                            "Upstream Regulators & Mechanistic Network",
+                        )
+                        .clicked()
+                    {
+                        self.causal_subtab = CausalRegulatorsSubTab::UpstreamRegulators;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.causal_subtab == CausalRegulatorsSubTab::MultiHopNetworks,
+                            "Multi-Hop Causal Networks (CNA)",
+                        )
+                        .clicked()
+                    {
+                        self.causal_subtab = CausalRegulatorsSubTab::MultiHopNetworks;
+                    }
+                });
+                ui.separator();
+                match self.causal_subtab {
+                    CausalRegulatorsSubTab::UpstreamRegulators => {
+                        self.render_ura_mechanistic_tab(ui, &pal, &mut actions);
+                    }
+                    CausalRegulatorsSubTab::MultiHopNetworks => {
+                        self.render_cna_tab(ui, &pal, &mut actions);
+                    }
+                }
             }
-            WorkbenchTab::CausalNetworksMultiHop => {
-                self.render_cna_tab(ui, &pal, &mut actions);
+            WorkbenchTab::PhenotypeDrugMatch => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(
+                            self.phenotype_subtab == PhenotypeDrugSubTab::ComparisonAndReversers,
+                            "Multi-Cohort Comparison & Drug Reversers",
+                        )
+                        .clicked()
+                    {
+                        self.phenotype_subtab = PhenotypeDrugSubTab::ComparisonAndReversers;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.phenotype_subtab == PhenotypeDrugSubTab::DownstreamTreeMap,
+                            "Downstream Effects TreeMap",
+                        )
+                        .clicked()
+                    {
+                        self.phenotype_subtab = PhenotypeDrugSubTab::DownstreamTreeMap;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.phenotype_subtab == PhenotypeDrugSubTab::RegulatorEffectsFlow,
+                            "Regulator Effects (3-Tier Flow)",
+                        )
+                        .clicked()
+                    {
+                        self.phenotype_subtab = PhenotypeDrugSubTab::RegulatorEffectsFlow;
+                    }
+                });
+                ui.separator();
+                match self.phenotype_subtab {
+                    PhenotypeDrugSubTab::ComparisonAndReversers => {
+                        self.render_comparison_perturb_tab(ui, &pal, &mut actions);
+                    }
+                    PhenotypeDrugSubTab::DownstreamTreeMap => {
+                        self.render_dea_treemap_tab(ui, &pal, &mut actions);
+                    }
+                    PhenotypeDrugSubTab::RegulatorEffectsFlow => {
+                        self.render_regulator_effects_tab(ui, &pal, &mut actions);
+                    }
+                }
             }
-            WorkbenchTab::DownstreamTreeMap => {
-                self.render_dea_treemap_tab(ui, &pal, &mut actions);
-            }
-            WorkbenchTab::RegulatorEffectsFlow => {
-                self.render_regulator_effects_tab(ui, &pal, &mut actions);
-            }
-            WorkbenchTab::ComparisonAndPerturb => {
-                self.render_comparison_perturb_tab(ui, &pal, &mut actions);
-            }
-            WorkbenchTab::OpenDataStreams => {
+            WorkbenchTab::KnowledgeDatabases => {
                 self.render_open_streams_tab(ui, &pal, &mut actions);
             }
         });
 
         for act in actions {
             self.apply_action(ctx, act);
+        }
+    }
+
+    fn render_global_omnibox_and_context_strip(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut Ui,
+        pal: &ScientificPalette,
+        actions: &mut Vec<GuiAction>,
+    ) {
+        let ds = &self.cohorts[self.active_cohort_idx];
+        let mut meas_by_sym: HashMap<&str, (f64, f64)> = HashMap::new();
+        for r in &ds.rows {
+            meas_by_sym.insert(r.symbol.as_str(), (r.log2_fc, r.fdr));
+        }
+
+        let mut sym_pathways: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+        for pw in &self.kg.pathways {
+            for m in &pw.members {
+                let list = sym_pathways.entry(m.as_str()).or_default();
+                if !list.iter().any(|(id, _)| *id == pw.id.as_str()) {
+                    list.push((pw.id.as_str(), pw.name.as_str()));
+                }
+            }
+            for e in &pw.topology_edges {
+                for ep in [e.from.as_str(), e.to.as_str()] {
+                    let list = sym_pathways.entry(ep).or_default();
+                    if !list.iter().any(|(id, _)| *id == pw.id.as_str()) {
+                        list.push((pw.id.as_str(), pw.name.as_str()));
+                    }
+                }
+            }
+        }
+
+        let mut edit_rect = Rect::NOTHING;
+        let mut enter_pressed = false;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Gene / Protein Omnibox (Ctrl+F):")
+                    .strong()
+                    .size(12.0),
+            );
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.omnibox_query)
+                    .hint_text("Jump to symbol, receptor, TF, or drug...")
+                    .desired_width(250.0),
+            );
+            edit_rect = resp.rect;
+
+            if self.omnibox_focus_requested {
+                resp.request_focus();
+                self.omnibox_focus_requested = false;
+            }
+            if resp.gained_focus() || resp.changed() {
+                self.omnibox_dropdown_open = !self.omnibox_query.trim().is_empty();
+            }
+            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                enter_pressed = true;
+            }
+            if !self.omnibox_query.is_empty() && ui.small_button("✕").clicked() {
+                self.omnibox_query.clear();
+                self.omnibox_dropdown_open = false;
+            }
+
+            // Context Strip for the active inspected gene/protein
+            if let Some(ref active_sym) = self.omnibox_selected_gene {
+                ui.separator();
+                let (kind_lbl, comp_lbl) = self
+                    .kg
+                    .nodes
+                    .get(active_sym)
+                    .map(|n| (n.kind.label(), n.location.label()))
+                    .unwrap_or(("Gene / Transcript", "Cytoplasm"));
+                ui.label(
+                    RichText::new(active_sym)
+                        .strong()
+                        .color(Color32::from_rgb(250, 204, 21)),
+                );
+                ui.label(
+                    RichText::new(format!("{kind_lbl} | {comp_lbl}"))
+                        .size(11.5)
+                        .color(pal.text_muted),
+                );
+                if let Some(&(fc, fdr)) = meas_by_sym.get(active_sym.as_str()) {
+                    let c = if fc > 0.0 { pal.expr_up } else { pal.expr_down };
+                    ui.colored_label(
+                        c,
+                        RichText::new(format!("log2FC {fc:+.2} (FDR {fdr:.2e})")).size(11.5),
+                    );
+                }
+                if let Some(pws) = sym_pathways.get(active_sym.as_str()) {
+                    ui.label(RichText::new("Pathways:").size(11.5).color(pal.text_muted));
+                    for &(pw_id, pw_name) in pws.iter().take(4) {
+                        if ui
+                            .small_button(pw_id)
+                            .on_hover_text(pw_name)
+                            .clicked()
+                        {
+                            actions.push(GuiAction::JumpToGene {
+                                symbol: active_sym.clone(),
+                                pathway_id: Some(pw_id.to_string()),
+                            });
+                        }
+                    }
+                }
+            } else {
+                ui.separator();
+                ui.label(
+                    RichText::new("Tip: Press Ctrl+F to locate any molecule across pathways and cohorts.")
+                        .size(11.5)
+                        .color(pal.text_muted),
+                );
+            }
+        });
+
+        let needle = self.omnibox_query.trim().to_ascii_uppercase();
+        if !needle.is_empty() && (self.omnibox_dropdown_open || enter_pressed) {
+            struct MatchItem<'a> {
+                score: u8,
+                symbol: String,
+                kind: &'static str,
+                compartment: &'static str,
+                log2_fc: Option<f64>,
+                pathways: Vec<(&'a str, &'a str)>,
+            }
+
+            let mut seen_syms: BTreeSet<String> = BTreeSet::new();
+            let mut matches: Vec<MatchItem<'_>> = Vec::new();
+
+            for (sym, node) in &self.kg.nodes {
+                let id_up = sym.to_ascii_uppercase();
+                let name_up = node.display_name.to_ascii_uppercase();
+                let score = if id_up == needle {
+                    4
+                } else if id_up.starts_with(&needle) {
+                    3
+                } else if id_up.contains(&needle) {
+                    2
+                } else if name_up.contains(&needle) {
+                    1
+                } else {
+                    0
+                };
+                if score > 0 {
+                    seen_syms.insert(sym.clone());
+                    matches.push(MatchItem {
+                        score,
+                        symbol: sym.clone(),
+                        kind: node.kind.label(),
+                        compartment: node.location.label(),
+                        log2_fc: meas_by_sym.get(sym.as_str()).map(|v| v.0),
+                        pathways: sym_pathways
+                            .get(sym.as_str())
+                            .cloned()
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+            for r in &ds.rows {
+                if !seen_syms.contains(&r.symbol) {
+                    let id_up = r.symbol.to_ascii_uppercase();
+                    let score = if id_up == needle {
+                        4
+                    } else if id_up.starts_with(&needle) {
+                        3
+                    } else if id_up.contains(&needle) {
+                        2
+                    } else {
+                        0
+                    };
+                    if score > 0 {
+                        seen_syms.insert(r.symbol.clone());
+                        matches.push(MatchItem {
+                            score,
+                            symbol: r.symbol.clone(),
+                            kind: "Measured Transcript",
+                            compartment: "Cytoplasm",
+                            log2_fc: Some(r.log2_fc),
+                            pathways: sym_pathways
+                                .get(r.symbol.as_str())
+                                .cloned()
+                                .unwrap_or_default(),
+                        });
+                    }
+                }
+            }
+
+            matches.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| b.pathways.len().cmp(&a.pathways.len()))
+                    .then_with(|| {
+                        b.log2_fc
+                            .unwrap_or(0.0)
+                            .abs()
+                            .total_cmp(&a.log2_fc.unwrap_or(0.0).abs())
+                    })
+                    .then_with(|| a.symbol.cmp(&b.symbol))
+            });
+
+            if enter_pressed {
+                if let Some(top) = matches.first() {
+                    actions.push(GuiAction::JumpToGene {
+                        symbol: top.symbol.clone(),
+                        pathway_id: top.pathways.first().map(|p| p.0.to_string()),
+                    });
+                }
+            } else if self.omnibox_dropdown_open && !matches.is_empty() {
+                let popup_pos = Pos2::new(edit_rect.left(), edit_rect.bottom() + 4.0);
+                let mut close_dropdown = false;
+                egui::Area::new(egui::Id::new("causal_atlas_omnibox_dropdown"))
+                    .fixed_pos(popup_pos)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(640.0);
+                            egui::Grid::new("omnibox_autocomplete_grid")
+                                .striped(true)
+                                .num_columns(5)
+                                .spacing([14.0, 5.0])
+                                .show(ui, |ui| {
+                                    ui.strong("Symbol");
+                                    ui.strong("Kind");
+                                    ui.strong("Compartment");
+                                    ui.strong("log2FC");
+                                    ui.strong("Pathways");
+                                    ui.end_row();
+
+                                    for item in matches.iter().take(12) {
+                                        if ui
+                                            .selectable_label(
+                                                false,
+                                                RichText::new(&item.symbol).strong(),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(GuiAction::JumpToGene {
+                                                symbol: item.symbol.clone(),
+                                                pathway_id: item
+                                                    .pathways
+                                                    .first()
+                                                    .map(|p| p.0.to_string()),
+                                            });
+                                            close_dropdown = true;
+                                        }
+                                        ui.label(item.kind);
+                                        ui.label(item.compartment);
+                                        if let Some(fc) = item.log2_fc {
+                                            let c = if fc > 0.0 {
+                                                pal.expr_up
+                                            } else {
+                                                pal.expr_down
+                                            };
+                                            ui.colored_label(c, format!("{fc:+.2}"));
+                                        } else {
+                                            ui.label(
+                                                RichText::new("—").color(pal.text_muted),
+                                            );
+                                        }
+                                        if item.pathways.is_empty() {
+                                            ui.label(
+                                                RichText::new("Cohort DEG").color(pal.text_muted),
+                                            );
+                                        } else {
+                                            let pw_str: String = item
+                                                .pathways
+                                                .iter()
+                                                .take(3)
+                                                .map(|p| p.0)
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            ui.label(pw_str);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    });
+                if close_dropdown {
+                    self.omnibox_dropdown_open = false;
+                }
+            }
         }
     }
 }
@@ -1188,412 +1776,855 @@ impl CausalAtlasApp {
         pal: &ScientificPalette,
         actions: &mut Vec<GuiAction>,
     ) {
-        let Self {
-            reports,
-            cohorts,
-            active_cohort_idx,
-            config,
-            kg,
-            pathway_search,
-            selected_pathway_idx,
-            selected_pathway_node,
-            map_user_clamps,
-            pathway_fullscreen,
-            pathway_zoom,
-            pathway_pan,
-            ..
-        } = self;
+        let rep = self.reports[self.active_cohort_idx].clone();
+        let active_pw_id = self.active_pathway_id();
+        let is_full = self.pathway_fullscreen;
+        let show_drawer = !is_full && !self.sidebar_hidden;
 
-        let rep = &reports[*active_cohort_idx];
-        let sel_pw_idx = *selected_pathway_idx;
-        let is_full = *pathway_fullscreen;
+        let total_avail_h = ui.available_height().max(380.0);
 
-        let render_diagram_pane = |pane_ui: &mut Ui,
-                                   actions: &mut Vec<GuiAction>,
-                                   pathway_zoom: &mut f32,
-                                   pathway_pan: &mut Vec2| {
-            pane_ui.horizontal_wrapped(|ui| {
-                ui.heading("Canonical Pathway Diagram & MAP");
-                let fs_lbl = if is_full { "Exit Full Screen" } else { "Full Screen Map" };
-                if ui.button(fs_lbl).clicked() {
-                    actions.push(GuiAction::TogglePathwayFullscreen);
-                }
-                if ui.button(format!("Reset View ({:.0}%)", *pathway_zoom * 100.0)).clicked() {
-                    actions.push(GuiAction::ResetPathwayViewport);
-                }
-                if ui.button("Export SVG").clicked() {
-                    actions.push(GuiAction::ExportPathwaySvgDialog);
-                }
-                if let Some(sh) = rep.canonical_pathways.get(sel_pw_idx) {
-                    if sh.pathway_id.starts_with("R-HSA-") {
-                        let needs_coords = kg
-                            .pathways
-                            .iter()
-                            .find(|p| p.id == sh.pathway_id)
-                            .is_some_and(|p| p.node_coords.is_empty());
-                        if needs_coords && ui.button("Fetch Reactome 2D Layout").clicked() {
-                            actions.push(GuiAction::FetchReactomeDiagram(sh.pathway_id.clone()));
+        ui.horizontal_top(|ui| {
+            if show_drawer {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(310.0, total_avail_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |drawer_ui| {
+                        drawer_ui.set_max_width(310.0);
+                        drawer_ui.horizontal(|ui| {
+                            ui.heading("Pathways");
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pathway_search)
+                                    .hint_text("Filter...")
+                                    .desired_width(175.0),
+                            );
+                        });
+
+                        let needle = self.pathway_search.trim().to_lowercase();
+                        drawer_ui.push_id("canonical_pw_scroll", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height((total_avail_h * 0.56).max(200.0))
+                                .show(ui, |ui| {
+                                    let max_bar = rep
+                                        .canonical_pathways
+                                        .iter()
+                                        .map(|p| p.neg_log10_fdr)
+                                        .fold(3.0f64, f64::max);
+
+                                    for (idx, hit) in rep.canonical_pathways.iter().enumerate() {
+                                        if !needle.is_empty()
+                                            && !hit.pathway_name.to_lowercase().contains(&needle)
+                                            && !hit.pathway_id.to_lowercase().contains(&needle)
+                                        {
+                                            continue;
+                                        }
+                                        let is_sel =
+                                            active_pw_id.as_deref() == Some(hit.pathway_id.as_str());
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    is_sel,
+                                                    format!(
+                                                        "{} ({}/{})",
+                                                        hit.pathway_name,
+                                                        hit.overlap_count,
+                                                        hit.pathway_size
+                                                    ),
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(GuiAction::SelectPathway(idx));
+                                            }
+                                        });
+                                        let bar_w = ((hit.neg_log10_fdr / max_bar).clamp(0.04, 1.0)
+                                            as f32)
+                                            * 145.0;
+                                        ui.horizontal(|ui| {
+                                            let (r, p) = ui.allocate_painter(
+                                                Vec2::new(bar_w, 11.0),
+                                                Sense::click(),
+                                            );
+                                            let fill = hit
+                                                .activation_z
+                                                .map(|z| pal.color_for_z(z))
+                                                .unwrap_or(pal.neutral_node);
+                                            p.rect_filled(r.rect, 3.0, fill);
+                                            if r.clicked() {
+                                                actions.push(GuiAction::SelectPathway(idx));
+                                            }
+                                            let z_txt = hit
+                                                .activation_z
+                                                .map(|z| format!("Z={z:+.2}"))
+                                                .unwrap_or_else(|| "Z=n/a".to_string());
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "-log10(q)={:.1} | {z_txt}",
+                                                    hit.neg_log10_fdr
+                                                ))
+                                                .size(10.5)
+                                                .color(pal.text_muted),
+                                            );
+                                        });
+                                        ui.add_space(3.0);
+                                    }
+                                });
+                        });
+
+                        drawer_ui.separator();
+                        if let Some(ref pw_id) = active_pw_id {
+                            if let Some(hit) =
+                                rep.canonical_pathways.iter().find(|p| &p.pathway_id == pw_id)
+                            {
+                                drawer_ui.label(
+                                    RichText::new(format!(
+                                        "{} [{}]",
+                                        hit.pathway_name, hit.pathway_id
+                                    ))
+                                    .strong()
+                                    .size(12.0),
+                                );
+                                drawer_ui.label(
+                                    RichText::new(format!(
+                                        "{} | Overlap {}/{} ({:.0}%) | FDR {:.2e}",
+                                        hit.source_db,
+                                        hit.overlap_count,
+                                        hit.pathway_size,
+                                        hit.overlap_ratio * 100.0,
+                                        hit.fdr
+                                    ))
+                                    .size(11.0)
+                                    .color(pal.text_muted),
+                                );
+                                if !hit.upregulated_genes.is_empty() {
+                                    drawer_ui.colored_label(
+                                        pal.expr_up,
+                                        RichText::new(format!(
+                                            "Up: {}",
+                                            hit.upregulated_genes.join(", ")
+                                        ))
+                                        .size(11.0),
+                                    );
+                                }
+                                if !hit.downregulated_genes.is_empty() {
+                                    drawer_ui.colored_label(
+                                        pal.expr_down,
+                                        RichText::new(format!(
+                                            "Down: {}",
+                                            hit.downregulated_genes.join(", ")
+                                        ))
+                                        .size(11.0),
+                                    );
+                                }
+                            } else if let Some(pw) =
+                                self.kg.pathways.iter().find(|p| &p.id == pw_id)
+                            {
+                                drawer_ui.label(
+                                    RichText::new(format!("{} [{}]", pw.name, pw.id))
+                                        .strong()
+                                        .size(12.0),
+                                );
+                                drawer_ui.label(
+                                    RichText::new(format!(
+                                        "{} | {} members (unmatched in active DEG cutoff)",
+                                        pw.source_db,
+                                        pw.members.len()
+                                    ))
+                                    .size(11.0)
+                                    .color(pal.text_muted),
+                                );
+                            }
+                        }
+                    },
+                );
+                ui.separator();
+            }
+
+            ui.vertical(|pane_ui| {
+                let Some(pw_id) = active_pw_id.clone() else {
+                    pane_ui.label("No canonical pathways available.");
+                    return;
+                };
+                let Some(pw_def) = self.kg.pathways.iter().find(|p| p.id == pw_id).cloned() else {
+                    pane_ui.label("Selected pathway not found in knowledge graph.");
+                    return;
+                };
+
+                let wl = compute_pathway_world_layout_cached(&pw_def, &self.kg);
+                let mut world_positions: BTreeMap<String, Pos2> = wl
+                    .positions
+                    .iter()
+                    .map(|(k, &(x, y))| (k.clone(), Pos2::new(x, y)))
+                    .collect();
+                if let Some(pinned_map) = self.pinned_pathway_nodes.get(&pw_def.id) {
+                    for (k, &p) in pinned_map {
+                        if world_positions.contains_key(k) {
+                            world_positions.insert(k.clone(), p);
                         }
                     }
                 }
-                if !map_user_clamps.is_empty() && ui.button("Reset MAP Clamps").clicked() {
-                    actions.push(GuiAction::ClearAllClamps);
-                }
-            });
+                let pinned_count = self
+                    .pinned_pathway_nodes
+                    .get(&pw_def.id)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
 
-            if let Some(sel_hit) = rep.canonical_pathways.get(sel_pw_idx) {
-                if let Some(pw_def) = kg.pathways.iter().find(|p| p.id == sel_hit.pathway_id) {
-                    let active = cohorts[*active_cohort_idx].filter_active(
-                        config.abs_log2fc_cutoff,
-                        config.fdr_cutoff,
-                        kg,
+                // Toolbar row
+                pane_ui.horizontal_wrapped(|ui| {
+                    ui.heading("Pathway Atlas & MAP");
+                    ui.label(
+                        RichText::new(format!(
+                            "[{} | {} nodes | {} edges | {:.0}×{:.0}px world | {:.0}%]",
+                            pw_def.id,
+                            world_positions.len(),
+                            wl.edges.len(),
+                            wl.world_w,
+                            wl.world_h,
+                            self.pathway_zoom * 100.0
+                        ))
+                        .size(11.5)
+                        .color(pal.text_muted),
                     );
-                    let map_res = simulate_map(
-                        pw_def,
-                        &active,
-                        map_user_clamps,
-                        config.map_damping,
-                        config.map_iterations,
-                    );
-
-                    if let Some(ref sel_nid) = *selected_pathway_node {
-                        pane_ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("Node: {sel_nid}")).strong());
-                            if ui.button("Activate (+1)").clicked() {
-                                actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), Some(1.0)));
-                            }
-                            if ui.button("Inhibit (-1)").clicked() {
-                                actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), Some(-1.0)));
-                            }
-                            if ui.button("Unclamp").clicked() {
-                                actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), None));
-                            }
-                        });
+                    if ui.button("Fit All").clicked() {
+                        actions.push(GuiAction::FitPathwayViewport);
+                    }
+                    if ui.button("Center Selected").clicked() {
+                        actions.push(GuiAction::CenterSelectedPathwayNode);
+                    }
+                    if ui.button("Re-Layout").clicked() {
+                        actions.push(GuiAction::RelayoutActivePathway);
+                    }
+                    if ui
+                        .selectable_label(self.pathway_ego_filter, "1-Hop Ego Filter")
+                        .clicked()
+                    {
+                        actions.push(GuiAction::TogglePathwayEgoFilter);
+                    }
+                    let sb_lbl = if self.sidebar_hidden {
+                        "Show Sidebar ▶"
                     } else {
-                        pane_ui.label(
+                        "◀ Hide Sidebar"
+                    };
+                    if ui.button(sb_lbl).clicked() {
+                        actions.push(GuiAction::ToggleSidebarHidden);
+                    }
+                    let fs_lbl = if is_full {
+                        "Exit Full Screen"
+                    } else {
+                        "Full Screen"
+                    };
+                    if ui.button(fs_lbl).clicked() {
+                        actions.push(GuiAction::TogglePathwayFullscreen);
+                    }
+                    if ui.button("Export SVG").clicked() {
+                        actions.push(GuiAction::ExportPathwaySvgDialog);
+                    }
+                    if pinned_count > 0
+                        && ui.button(format!("Unpin ({pinned_count})")).clicked()
+                    {
+                        actions.push(GuiAction::UnpinPathwayNodes(pw_def.id.clone()));
+                    }
+                    if pw_def.id.starts_with("R-HSA-") && pw_def.node_coords.is_empty() {
+                        if ui.button("Fetch Reactome 2D").clicked() {
+                            actions.push(GuiAction::FetchReactomeDiagram(pw_def.id.clone()));
+                        }
+                    }
+                    if !self.map_user_clamps.is_empty() && ui.button("Reset MAP Clamps").clicked() {
+                        actions.push(GuiAction::ClearAllClamps);
+                    }
+                });
+
+                let active = self.cohorts[self.active_cohort_idx].filter_active(
+                    self.config.abs_log2fc_cutoff,
+                    self.config.fdr_cutoff,
+                    &self.kg,
+                );
+                let map_res = simulate_map_in_kg(
+                    &pw_def,
+                    &active,
+                    &self.kg,
+                    &self.map_user_clamps,
+                    self.config.map_damping,
+                    self.config.map_iterations,
+                );
+
+                // 1-Hop Ego Filter computation
+                let ego_visible: Option<BTreeSet<String>> = if self.pathway_ego_filter {
+                    let root = self
+                        .selected_pathway_node
+                        .as_ref()
+                        .filter(|s| world_positions.contains_key(*s))
+                        .cloned()
+                        .or_else(|| world_positions.keys().next().cloned());
+                    root.map(|r| {
+                        let mut set = BTreeSet::new();
+                        set.insert(r.clone());
+                        for e in &wl.edges {
+                            if e.from == r {
+                                set.insert(e.to.clone());
+                            } else if e.to == r {
+                                set.insert(e.from.clone());
+                            }
+                        }
+                        set
+                    })
+                } else {
+                    None
+                };
+
+                // Selected node MAP clamp bar
+                pane_ui.horizontal_wrapped(|ui| {
+                    if let Some(ref sel_nid) = self.selected_pathway_node {
+                        ui.label(
+                            RichText::new(format!("Selected: {sel_nid}"))
+                                .strong()
+                                .color(Color32::from_rgb(250, 204, 21)),
+                        );
+                        if ui.small_button("Activate (+1)").clicked() {
+                            actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), Some(1.0)));
+                        }
+                        if ui.small_button("Inhibit (-1)").clicked() {
+                            actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), Some(-1.0)));
+                        }
+                        if ui.small_button("Unclamp").clicked() {
+                            actions.push(GuiAction::SetNodeClamp(sel_nid.clone(), None));
+                        }
+                    } else {
+                        ui.label(
                             RichText::new(
-                                "Drag to pan, scroll wheel to zoom, or click any molecule to clamp in-silico MAP activity.",
+                                "Scroll to zoom toward cursor (15%-350%), drag background to pan, drag any molecule to pin, click to inspect & clamp MAP.",
                             )
                             .size(11.5)
                             .color(pal.text_muted),
                         );
                     }
-
-                    let canvas_sz = Vec2::new(
-                        pane_ui.available_width().max(320.0),
-                        (pane_ui.available_height() - 8.0).max(340.0),
-                    );
-                    let (resp, painter) =
-                        pane_ui.allocate_painter(canvas_sz, Sense::click_and_drag());
-                    let rect = resp.rect;
-                    let painter = painter.with_clip_rect(rect);
-                    painter.rect_filled(rect, 6.0, pal.bg_canvas);
-                    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
-
-                    if resp.dragged() {
-                        *pathway_pan += resp.drag_delta();
-                    }
-                    if resp.hovered() {
-                        let scroll_y = pane_ui.input(|i| i.smooth_scroll_delta.y);
-                        if scroll_y.abs() > 0.5 {
-                            let factor = if scroll_y > 0.0 { 1.08 } else { 0.92 };
-                            *pathway_zoom = (*pathway_zoom * factor).clamp(0.55, 2.4);
-                        }
-                    }
-
-                    let zoom = *pathway_zoom;
-                    let pan = *pathway_pan;
-                    let vw = rect.width().max(320.0);
-                    let vh = rect.height().max(320.0);
-                    let center = rect.center();
-
-                    let to_screen = |nx: f32, ny: f32| -> Pos2 {
-                        let wx = (nx - 0.5) * (vw - 96.0).max(200.0);
-                        let wy = (ny - 0.5) * (vh - 56.0).max(200.0);
-                        Pos2::new(center.x + wx * zoom + pan.x, center.y + wy * zoom + pan.y)
-                    };
-
-                    // 1. Solid architectural Plasma Membrane (y=0.18) & Nuclear Envelope (y=0.72) bars
-                    let pm_l = to_screen(0.02, 0.18);
-                    let pm_r = to_screen(0.98, 0.18);
-                    painter.line_segment([pm_l, pm_r], Stroke::new(6.5 * zoom, pal.border_default));
-
-                    let nm_l = to_screen(0.06, 0.72);
-                    let nm_r = to_screen(0.94, 0.72);
-                    painter.line_segment([nm_l, nm_r], Stroke::new(6.0 * zoom, pal.border_default));
-
-                    painter.text(
-                        Pos2::new(rect.left() + 12.0, rect.top() + 8.0),
-                        Align2::LEFT_TOP,
-                        SubcellularLocation::Extracellular.label(),
-                        FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
-                        pal.text_muted,
-                    );
-                    painter.text(
-                        Pos2::new(pm_l.x + 4.0, pm_l.y + 22.0 * zoom),
-                        Align2::LEFT_TOP,
-                        SubcellularLocation::Cytoplasm.label(),
-                        FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
-                        pal.text_muted,
-                    );
-                    if !pw_def.cell_context_label.is_empty() {
-                        painter.text(
-                            Pos2::new(rect.right() - 12.0, rect.top() + 8.0),
-                            Align2::RIGHT_TOP,
-                            &pw_def.cell_context_label,
-                            FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
-                            pal.text_muted,
+                    if let Some(ref ego) = ego_visible {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("1-Hop Ego Subgraph: {} nodes", ego.len()))
+                                .size(11.5)
+                                .color(pal.activated_strong),
                         );
                     }
+                });
+
+                let canvas_sz = Vec2::new(
+                    pane_ui.available_width().max(320.0),
+                    (pane_ui.available_height() - 6.0).max(340.0),
+                );
+                let (resp, painter) =
+                    pane_ui.allocate_painter(canvas_sz, Sense::click_and_drag());
+                let rect = resp.rect;
+                let painter = painter.with_clip_rect(rect);
+                painter.rect_filled(rect, 6.0, pal.bg_canvas);
+                painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+
+                let world_center = Pos2::new(wl.world_w * 0.5, wl.world_h * 0.5);
+
+                if self.pathway_fit_pending {
+                    self.pathway_zoom = ((rect.width() - 36.0) / wl.world_w)
+                        .min((rect.height() - 36.0) / wl.world_h)
+                        .clamp(0.15, 3.5);
+                    self.pathway_pan = Vec2::ZERO;
+                    self.pathway_fit_pending = false;
+                    self.camera_anim_progress = 1.0;
+                }
+
+                if let Some(target_nid) = self.camera_pan_pending_node.take() {
+                    if let Some(&wpos) = world_positions.get(&target_nid) {
+                        self.camera_anim_start_pan = self.pathway_pan;
+                        self.camera_anim_start_zoom = self.pathway_zoom;
+                        let target_zoom = self.pathway_zoom.max(1.18).clamp(0.15, 3.5);
+                        self.camera_anim_target_zoom = target_zoom;
+                        self.camera_anim_target_pan = Vec2::new(
+                            (world_center.x - wpos.x) * target_zoom,
+                            (world_center.y - wpos.y) * target_zoom,
+                        );
+                        self.camera_anim_progress = 0.0;
+                    }
+                }
+
+                if self.camera_anim_progress < 1.0 {
+                    let dt = pane_ui.input(|i| i.unstable_dt).clamp(0.008, 0.05);
+                    self.camera_anim_progress = (self.camera_anim_progress + dt * 3.8).min(1.0);
+                    let ease = 1.0 - (1.0 - self.camera_anim_progress).powi(3);
+                    self.pathway_zoom = self.camera_anim_start_zoom
+                        + (self.camera_anim_target_zoom - self.camera_anim_start_zoom) * ease;
+                    self.pathway_pan = self.camera_anim_start_pan
+                        + (self.camera_anim_target_pan - self.camera_anim_start_pan) * ease;
+                }
+
+                // Cursor-anchored scroll zoom in 0.15..=3.5
+                if resp.hovered() {
+                    let scroll_y = pane_ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll_y.abs() > 0.1 {
+                        self.camera_anim_progress = 1.0;
+                        let old_zoom = self.pathway_zoom;
+                        let factor = (1.0 + scroll_y * 0.0022).clamp(0.80, 1.25);
+                        let new_zoom = (old_zoom * factor).clamp(0.15, 3.5);
+                        if let Some(cursor) = pane_ui.input(|i| i.pointer.hover_pos()) {
+                            let w_under = Pos2::new(
+                                world_center.x
+                                    + (cursor.x - rect.center().x - self.pathway_pan.x)
+                                        / old_zoom.max(0.05),
+                                world_center.y
+                                    + (cursor.y - rect.center().y - self.pathway_pan.y)
+                                        / old_zoom.max(0.05),
+                            );
+                            self.pathway_pan = Vec2::new(
+                                cursor.x - rect.center().x - (w_under.x - world_center.x) * new_zoom,
+                                cursor.y - rect.center().y - (w_under.y - world_center.y) * new_zoom,
+                            );
+                        }
+                        self.pathway_zoom = new_zoom;
+                    }
+                }
+
+                let minimap_rect = Rect::from_min_size(
+                    Pos2::new(rect.right() - 162.0, rect.bottom() - 122.0),
+                    Vec2::new(150.0, 110.0),
+                );
+                let minimap_inner = minimap_rect.shrink(6.0);
+
+                // Handle Mini-Map interaction OR node drag-to-pin OR background pan
+                let pointer_pos = resp
+                    .interact_pointer_pos()
+                    .or_else(|| pane_ui.input(|i| i.pointer.hover_pos()));
+
+                let zoom_now = self.pathway_zoom;
+                let pan_now = self.pathway_pan;
+                let world_to_screen = |wx: f32, wy: f32| -> Pos2 {
+                    Pos2::new(
+                        rect.center().x + pan_now.x + (wx - world_center.x) * zoom_now,
+                        rect.center().y + pan_now.y + (wy - world_center.y) * zoom_now,
+                    )
+                };
+                let screen_to_world = |sp: Pos2| -> Pos2 {
+                    Pos2::new(
+                        world_center.x + (sp.x - rect.center().x - pan_now.x) / zoom_now.max(0.05),
+                        world_center.y + (sp.y - rect.center().y - pan_now.y) / zoom_now.max(0.05),
+                    )
+                };
+
+                let pointer_in_minimap = pointer_pos.is_some_and(|pp| minimap_rect.contains(pp));
+
+                if resp.drag_started() && !pointer_in_minimap {
+                    self.camera_anim_progress = 1.0;
+                    if let Some(pp) = pointer_pos {
+                        let hit_nid = world_positions.iter().find_map(|(nid, &wpos)| {
+                            if let Some(ref ego) = ego_visible {
+                                if !ego.contains(nid) {
+                                    return None;
+                                }
+                            }
+                            let sp = world_to_screen(wpos.x, wpos.y);
+                            let hw = (36.0 * zoom_now).max(16.0);
+                            let hh = (18.0 * zoom_now).max(10.0);
+                            if (pp.x - sp.x).abs() <= hw && (pp.y - sp.y).abs() <= hh {
+                                Some(nid.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        self.dragging_pathway_node = hit_nid.clone();
+                        if let Some(nid) = hit_nid {
+                            self.selected_pathway_node = Some(nid.clone());
+                            self.omnibox_selected_gene = Some(nid);
+                        }
+                    }
+                }
+
+                if resp.dragged() {
+                    self.camera_anim_progress = 1.0;
+                    if pointer_in_minimap {
+                        if let Some(pp) = pointer_pos {
+                            let u = ((pp.x - minimap_inner.left()) / minimap_inner.width().max(1.0))
+                                .clamp(0.0, 1.0);
+                            let v = ((pp.y - minimap_inner.top()) / minimap_inner.height().max(1.0))
+                                .clamp(0.0, 1.0);
+                            let wx = u * wl.world_w;
+                            let wy = v * wl.world_h;
+                            self.pathway_pan = Vec2::new(
+                                (world_center.x - wx) * self.pathway_zoom,
+                                (world_center.y - wy) * self.pathway_zoom,
+                            );
+                        }
+                    } else if let Some(ref drag_nid) = self.dragging_pathway_node.clone() {
+                        let delta_world = resp.drag_delta() / self.pathway_zoom.max(0.05);
+                        if let Some(&cur_w) = world_positions.get(drag_nid) {
+                            let new_w = Pos2::new(
+                                (cur_w.x + delta_world.x).clamp(40.0, wl.world_w - 40.0),
+                                (cur_w.y + delta_world.y).clamp(32.0, wl.world_h - 32.0),
+                            );
+                            world_positions.insert(drag_nid.clone(), new_w);
+                            self.pinned_pathway_nodes
+                                .entry(pw_def.id.clone())
+                                .or_default()
+                                .insert(drag_nid.clone(), new_w);
+                        }
+                    } else {
+                        self.pathway_pan += resp.drag_delta();
+                    }
+                }
+
+                if resp.drag_stopped() {
+                    self.dragging_pathway_node = None;
+                }
+
+                if resp.clicked() && pointer_in_minimap {
+                    if let Some(pp) = resp.interact_pointer_pos() {
+                        let u = ((pp.x - minimap_inner.left()) / minimap_inner.width().max(1.0))
+                            .clamp(0.0, 1.0);
+                        let v = ((pp.y - minimap_inner.top()) / minimap_inner.height().max(1.0))
+                            .clamp(0.0, 1.0);
+                        let wx = u * wl.world_w;
+                        let wy = v * wl.world_h;
+                        self.pathway_pan = Vec2::new(
+                            (world_center.x - wx) * self.pathway_zoom,
+                            (world_center.y - wy) * self.pathway_zoom,
+                        );
+                    }
+                }
+
+                // Refresh closures after any pan/pin update
+                let zoom = self.pathway_zoom;
+                let pan = self.pathway_pan;
+                let to_screen = |wx: f32, wy: f32| -> Pos2 {
+                    Pos2::new(
+                        rect.center().x + pan.x + (wx - world_center.x) * zoom,
+                        rect.center().y + pan.y + (wy - world_center.y) * zoom,
+                    )
+                };
+
+                // 1. 5-Compartment Subcellular Architectural Bands in Virtual World Space
+                let pm_l = to_screen(24.0, wl.bands.plasma_membrane_y);
+                let pm_r = to_screen(wl.world_w - 24.0, wl.bands.plasma_membrane_y);
+                painter.line_segment(
+                    [pm_l, pm_r],
+                    Stroke::new((6.0 * zoom).clamp(2.0, 8.0), pal.border_default),
+                );
+
+                let org_l = to_screen(48.0, wl.bands.organelle_divider_y);
+                let org_r = to_screen(wl.world_w - 48.0, wl.bands.organelle_divider_y);
+                painter.line_segment([org_l, org_r], Stroke::new(1.2, pal.grid_line));
+
+                let nm_l = to_screen(52.0, wl.bands.nuclear_envelope_y);
+                let nm_r = to_screen(wl.world_w - 52.0, wl.bands.nuclear_envelope_y);
+                painter.line_segment(
+                    [nm_l, nm_r],
+                    Stroke::new((5.5 * zoom).clamp(2.0, 7.5), pal.border_default),
+                );
+
+                let label_sz = (11.5 * zoom.clamp(0.75, 1.2)).max(9.5);
+                painter.text(
+                    Pos2::new(rect.left() + 12.0, rect.top() + 8.0),
+                    Align2::LEFT_TOP,
+                    SubcellularLocation::Extracellular.label(),
+                    FontId::proportional(label_sz),
+                    pal.text_muted,
+                );
+                painter.text(
+                    Pos2::new(pm_l.x.max(rect.left() + 12.0), pm_l.y + 14.0 * zoom),
+                    Align2::LEFT_TOP,
+                    SubcellularLocation::Cytoplasm.label(),
+                    FontId::proportional(label_sz),
+                    pal.text_muted,
+                );
+                painter.text(
+                    Pos2::new(org_l.x.max(rect.left() + 12.0), org_l.y + 6.0 * zoom),
+                    Align2::LEFT_TOP,
+                    SubcellularLocation::Organelle.label(),
+                    FontId::proportional(label_sz * 0.92),
+                    pal.text_muted,
+                );
+                painter.text(
+                    Pos2::new(nm_l.x.max(rect.left() + 12.0), nm_l.y + 10.0 * zoom),
+                    Align2::LEFT_TOP,
+                    SubcellularLocation::Nucleus.label(),
+                    FontId::proportional(label_sz),
+                    pal.text_muted,
+                );
+                if !pw_def.cell_context_label.is_empty() {
                     painter.text(
-                        Pos2::new(nm_l.x + 4.0, nm_l.y + 11.0 * zoom),
-                        Align2::LEFT_TOP,
-                        SubcellularLocation::Nucleus.label(),
-                        FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
+                        Pos2::new(rect.right() - 12.0, rect.top() + 8.0),
+                        Align2::RIGHT_TOP,
+                        &pw_def.cell_context_label,
+                        FontId::proportional(label_sz),
                         pal.text_muted,
                     );
-
-                    // 2. Nuclear DNA Double Helix across promoter band (y=0.855)
-                    let dna_l = to_screen(0.11, 0.855);
-                    let dna_r = to_screen(0.89, 0.855);
-                    draw_dna_double_helix(
-                        &painter,
-                        dna_l.x,
-                        dna_r.x,
-                        dna_l.y,
-                        6.0 * zoom,
-                        pal.grid_line,
-                    );
-
-                    // 3. Resolve vertical-lane or GPML coordinates
-                    let norm_coords = pw_def.resolve_layout_coords(kg);
-                    let positions: BTreeMap<String, Pos2> = norm_coords
-                        .into_iter()
-                        .map(|(k, (nx, ny))| (k, to_screen(nx, ny)))
-                        .collect();
-
-                    // 4. Draw directed pathway edges
-                    for (e_idx, edge) in pw_def.topology_edges.iter().enumerate() {
-                        if let (Some(&p1), Some(&p2)) =
-                            (positions.get(&edge.from), positions.get(&edge.to))
-                        {
-                            let (consistent, flux) =
-                                map_res.edge_flux.get(e_idx).copied().unwrap_or((true, 0.0));
-                            let edge_col = if !consistent {
-                                pal.inconsistent_amber
-                            } else if flux > 0.12 {
-                                pal.activated_strong
-                            } else if flux < -0.12 {
-                                pal.inhibited_strong
-                            } else {
-                                pal.border_default
-                            };
-                            draw_directed_causal_edge(
-                                &painter,
-                                p1,
-                                p2,
-                                22.0 * zoom,
-                                edge.sign,
-                                Stroke::new(1.65 * zoom.clamp(0.8, 1.4), edge_col),
-                            );
-                        }
-                    }
-
-                    // 5. Draw classic entity glyphs & (P) phosphorylation badges
-                    let click_pt = if resp.clicked() {
-                        resp.interact_pointer_pos()
-                    } else {
-                        None
-                    };
-                    let hover_pt = resp.hover_pos();
-
-                    for (nid, st) in &map_res.states {
-                        if let Some(&pos) = positions.get(nid) {
-                            let kind = kg
-                                .nodes
-                                .get(nid)
-                                .map(|n| n.kind)
-                                .unwrap_or(EntityKind::GeneOther);
-                            let fill = if let Some(fc) = st.observed_log2fc {
-                                if st.user_clamp.is_some() {
-                                    pal.color_for_activity(st.predicted_activity)
-                                } else {
-                                    pal.color_for_log2fc(fc)
-                                }
-                            } else {
-                                pal.color_for_activity(st.predicted_activity)
-                            };
-
-                            let is_sel = selected_pathway_node.as_deref() == Some(nid.as_str());
-                            let border = if is_sel || st.user_clamp.is_some() {
-                                Stroke::new(2.5, Color32::from_rgb(168, 85, 247))
-                            } else if st.observed_log2fc.is_some() {
-                                Stroke::new(1.8, pal.text_primary)
-                            } else {
-                                Stroke::new(1.2, pal.border_default)
-                            };
-
-                            draw_entity_glyph(
-                                &painter,
-                                pos,
-                                Vec2::new(29.0 * zoom, 15.0 * zoom),
-                                kind,
-                                fill,
-                                border,
-                            );
-                            if pw_def.phospho_nodes.contains(nid) {
-                                draw_phospho_badge(
-                                    &painter,
-                                    Pos2::new(pos.x + 23.0 * zoom, pos.y - 13.0 * zoom),
-                                    pal.bg_canvas,
-                                    pal.border_default,
-                                );
-                            }
-                            painter.text(
-                                Pos2::new(
-                                    pos.x,
-                                    pos.y + if kind == EntityKind::Kinase { -2.0 * zoom } else { 0.0 },
-                                ),
-                                Align2::CENTER_CENTER,
-                                nid,
-                                FontId::proportional(10.0 * zoom.clamp(0.85, 1.35)),
-                                pal.text_primary,
-                            );
-
-                            if let Some(cp) = click_pt {
-                                if cp.distance(pos) <= 26.0 * zoom {
-                                    actions.push(GuiAction::SelectPathwayNode(nid.clone()));
-                                }
-                            }
-                            if let Some(hp) = hover_pt {
-                                if hp.distance(pos) <= 24.0 * zoom {
-                                    let obs_str = st
-                                        .observed_log2fc
-                                        .map(|v| format!("{v:+.2}"))
-                                        .unwrap_or_else(|| "unmeasured".to_string());
-                                    resp.clone().on_hover_text(format!(
-                                        "{nid} ({})
-Observed log2FC: {obs_str}
-MAP Activity: {:+.2}",
-                                        kind.label(),
-                                        st.predicted_activity
-                                    ));
-                                }
-                            }
-                        }
-                    }
                 }
-            }
-        };
 
-        if is_full {
-            render_diagram_pane(ui, actions, pathway_zoom, pathway_pan);
-            return;
-        }
-
-        ui.columns(2, |cols| {
-            cols[0].horizontal(|ui| {
-                ui.heading("Canonical Pathways");
-                ui.add_space(8.0);
-                ui.text_edit_singleline(pathway_search);
-            });
-
-            let needle = pathway_search.trim().to_lowercase();
-            cols[0].push_id("canonical_pw_scroll", |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(260.0)
-                    .show(ui, |ui| {
-                        let max_bar = rep
-                            .canonical_pathways
-                            .iter()
-                            .map(|p| p.neg_log10_fdr)
-                            .fold(3.0f64, f64::max);
-
-                        for (idx, hit) in rep.canonical_pathways.iter().enumerate() {
-                            if !needle.is_empty()
-                                && !hit.pathway_name.to_lowercase().contains(&needle)
-                                && !hit.pathway_id.to_lowercase().contains(&needle)
-                            {
-                                continue;
-                            }
-                            let is_sel = sel_pw_idx == idx;
-                            ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .selectable_label(
-                                        is_sel,
-                                        format!(
-                                            "{} ({}/{})",
-                                            hit.pathway_name, hit.overlap_count, hit.pathway_size
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    actions.push(GuiAction::SelectPathway(idx));
-                                }
-                            });
-                            let bar_w = ((hit.neg_log10_fdr / max_bar).clamp(0.04, 1.0) as f32)
-                                * (ui.available_width() - 168.0).max(60.0);
-                            ui.horizontal(|ui| {
-                                let (r, p) =
-                                    ui.allocate_painter(Vec2::new(bar_w, 12.0), Sense::click());
-                                let fill = hit
-                                    .activation_z
-                                    .map(|z| pal.color_for_z(z))
-                                    .unwrap_or(pal.neutral_node);
-                                p.rect_filled(r.rect, 3.0, fill);
-                                if r.clicked() {
-                                    actions.push(GuiAction::SelectPathway(idx));
-                                }
-                                let z_txt = hit
-                                    .activation_z
-                                    .map(|z| format!("Z={z:+.2}"))
-                                    .unwrap_or_else(|| "Z=n/a".to_string());
-                                ui.label(
-                                    RichText::new(format!(
-                                        "-log10(FDR)={:.1} | {z_txt}",
-                                        hit.neg_log10_fdr
-                                    ))
-                                    .size(11.0)
-                                    .color(pal.text_muted),
-                                );
-                            });
-                            ui.add_space(3.0);
-                        }
-                    });
-            });
-
-            cols[0].separator();
-            if let Some(sel_hit) = rep.canonical_pathways.get(sel_pw_idx) {
-                cols[0].label(
-                    RichText::new(format!(
-                        "{} [{}] — Source: {}",
-                        sel_hit.pathway_name, sel_hit.pathway_id, sel_hit.source_db
-                    ))
-                    .strong(),
+                // 2. Nuclear DNA Double Helix across promoter band
+                let dna_l = to_screen(wl.world_w * 0.11, wl.bands.dna_helix_y);
+                let dna_r = to_screen(wl.world_w * 0.89, wl.bands.dna_helix_y);
+                draw_dna_double_helix(
+                    &painter,
+                    dna_l.x,
+                    dna_r.x,
+                    dna_l.y,
+                    5.5 * zoom.clamp(0.4, 1.4),
+                    pal.grid_line,
                 );
-                cols[0].label(format!(
-                    "Overlap: {}/{} ({:.1}%) | P = {:.2e} | BH-FDR = {:.2e}",
-                    sel_hit.overlap_count,
-                    sel_hit.pathway_size,
-                    sel_hit.overlap_ratio * 100.0,
-                    sel_hit.p_value,
-                    sel_hit.fdr
-                ));
-                if !sel_hit.upregulated_genes.is_empty() {
-                    cols[0].colored_label(
-                        pal.expr_up,
-                        format!("Up DEGs: {}", sel_hit.upregulated_genes.join(", ")),
-                    );
-                }
-                if !sel_hit.downregulated_genes.is_empty() {
-                    cols[0].colored_label(
-                        pal.expr_down,
-                        format!("Down DEGs: {}", sel_hit.downregulated_genes.join(", ")),
-                    );
-                }
-            }
 
-            render_diagram_pane(&mut cols[1], actions, pathway_zoom, pathway_pan);
+                // 3. Draw cubic Bezier curved causal edges
+                let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+                let mut edge_seen_rev: HashSet<(String, String)> = HashSet::new();
+                for e in &wl.edges {
+                    edge_seen_rev.insert((e.from.clone(), e.to.clone()));
+                }
+
+                for (e_idx, edge) in wl.edges.iter().enumerate() {
+                    if let Some(ref ego) = ego_visible {
+                        if !ego.contains(&edge.from) || !ego.contains(&edge.to) {
+                            continue;
+                        }
+                    }
+                    if let (Some(&wp1), Some(&wp2)) =
+                        (world_positions.get(&edge.from), world_positions.get(&edge.to))
+                    {
+                        let p1 = to_screen(wp1.x, wp1.y);
+                        let p2 = to_screen(wp2.x, wp2.y);
+                        let (consistent, flux) =
+                            map_res.edge_flux.get(e_idx).copied().unwrap_or((true, 0.0));
+                        let edge_col = if !consistent {
+                            pal.inconsistent_amber
+                        } else if flux > 0.12 {
+                            pal.activated_strong
+                        } else if flux < -0.12 {
+                            pal.inhibited_strong
+                        } else {
+                            pal.border_default
+                        };
+                        let key = (edge.from.clone(), edge.to.clone());
+                        let dup_i = pair_counts.entry(key).or_insert(0);
+                        let has_rev =
+                            edge_seen_rev.contains(&(edge.to.clone(), edge.from.clone()));
+                        let bow = if has_rev {
+                            22.0 * zoom
+                        } else {
+                            (12.0 + (*dup_i as f32) * 14.0) * zoom
+                        };
+                        *dup_i += 1;
+
+                        draw_bezier_causal_edge(
+                            &painter,
+                            p1,
+                            p2,
+                            (20.0 * zoom).clamp(8.0, 36.0),
+                            (24.0 * zoom).clamp(10.0, 42.0),
+                            bow,
+                            edge.sign,
+                            Stroke::new((1.65 * zoom).clamp(0.9, 2.2), edge_col),
+                        );
+                    }
+                }
+
+                // 4. Draw entity glyphs, phosphorylation badges, pin indicators & gold pulse halo
+                let click_pt = if resp.clicked() && !pointer_in_minimap {
+                    resp.interact_pointer_pos()
+                } else {
+                    None
+                };
+                let hover_pt = if pointer_in_minimap { None } else { resp.hover_pos() };
+                let pulse_phase = pane_ui.input(|i| i.time as f32);
+
+                for (nid, st) in &map_res.states {
+                    if let Some(ref ego) = ego_visible {
+                        if !ego.contains(nid) {
+                            continue;
+                        }
+                    }
+                    if let Some(&wpos) = world_positions.get(nid) {
+                        let pos = to_screen(wpos.x, wpos.y);
+                        let kind = self
+                            .kg
+                            .nodes
+                            .get(nid)
+                            .map(|n| n.kind)
+                            .unwrap_or(EntityKind::GeneOther);
+                        let fill = if let Some(fc) = st.observed_log2fc {
+                            if st.user_clamp.is_some() {
+                                pal.color_for_activity(st.predicted_activity)
+                            } else {
+                                pal.color_for_log2fc(fc)
+                            }
+                        } else {
+                            pal.color_for_activity(st.predicted_activity)
+                        };
+
+                        let half_ext = Vec2::new((32.0 * zoom).max(16.0), (16.0 * zoom).max(9.0));
+                        let is_sel = self.selected_pathway_node.as_deref() == Some(nid.as_str());
+                        let is_pulsed = self.highlight_pulse_gene.as_deref() == Some(nid.as_str())
+                            && self.highlight_pulse_timer > 0.0;
+
+                        if is_pulsed || is_sel {
+                            draw_gold_pulse_halo(&painter, pos, half_ext, pulse_phase);
+                        }
+
+                        let border = if is_sel || st.user_clamp.is_some() {
+                            Stroke::new(2.4, Color32::from_rgb(250, 204, 21))
+                        } else if st.observed_log2fc.is_some() {
+                            Stroke::new(1.8, pal.text_primary)
+                        } else {
+                            Stroke::new(1.2, pal.border_default)
+                        };
+
+                        draw_entity_glyph(&painter, pos, half_ext, kind, fill, border);
+
+                        if pw_def.phospho_nodes.contains(nid) {
+                            draw_phospho_badge(
+                                &painter,
+                                Pos2::new(pos.x + half_ext.x * 0.80, pos.y - half_ext.y * 0.85),
+                                pal.bg_canvas,
+                                pal.border_default,
+                            );
+                        }
+                        if self
+                            .pinned_pathway_nodes
+                            .get(&pw_def.id)
+                            .is_some_and(|m| m.contains_key(nid))
+                        {
+                            painter.circle_filled(
+                                Pos2::new(pos.x - half_ext.x * 0.78, pos.y - half_ext.y * 0.78),
+                                3.0 * zoom.clamp(0.7, 1.3),
+                                Color32::from_rgb(56, 189, 248),
+                            );
+                        }
+
+                        painter.text(
+                            Pos2::new(
+                                pos.x,
+                                pos.y
+                                    + if kind == EntityKind::Kinase {
+                                        -2.0 * zoom
+                                    } else {
+                                        0.0
+                                    },
+                            ),
+                            Align2::CENTER_CENTER,
+                            nid,
+                            FontId::proportional((10.5 * zoom).clamp(8.0, 14.5)),
+                            pal.text_primary,
+                        );
+
+                        if let Some(cp) = click_pt {
+                            if (cp.x - pos.x).abs() <= half_ext.x
+                                && (cp.y - pos.y).abs() <= half_ext.y
+                            {
+                                actions.push(GuiAction::SelectPathwayNode(nid.clone()));
+                            }
+                        }
+                        if let Some(hp) = hover_pt {
+                            if (hp.x - pos.x).abs() <= half_ext.x
+                                && (hp.y - pos.y).abs() <= half_ext.y
+                            {
+                                let obs_str = st
+                                    .observed_log2fc
+                                    .map(|v| format!("{v:+.2}"))
+                                    .unwrap_or_else(|| "unmeasured".to_string());
+                                resp.clone().on_hover_text(format!(
+                                    "{nid} ({})\nCompartment: {}\nObserved log2FC: {obs_str}\nMAP Activity: {:+.2}",
+                                    kind.label(),
+                                    self.kg
+                                        .nodes
+                                        .get(nid)
+                                        .map(|n| n.location.label())
+                                        .unwrap_or("Cytoplasm"),
+                                    st.predicted_activity
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // 5. Bottom-right 150x110 px Mini-Map with live viewport box
+                painter.rect_filled(
+                    minimap_rect,
+                    5.0,
+                    Color32::from_rgba_unmultiplied(12, 16, 24, 224),
+                );
+                painter.rect_stroke(minimap_rect, 5.0, Stroke::new(1.2, pal.border_default));
+
+                let map_to_mini = |wx: f32, wy: f32| -> Pos2 {
+                    Pos2::new(
+                        minimap_inner.left()
+                            + (wx / wl.world_w.max(1.0)).clamp(0.0, 1.0) * minimap_inner.width(),
+                        minimap_inner.top()
+                            + (wy / wl.world_h.max(1.0)).clamp(0.0, 1.0) * minimap_inner.height(),
+                    )
+                };
+
+                let mm_pm_y = map_to_mini(0.0, wl.bands.plasma_membrane_y).y;
+                let mm_nm_y = map_to_mini(0.0, wl.bands.nuclear_envelope_y).y;
+                painter.line_segment(
+                    [
+                        Pos2::new(minimap_inner.left(), mm_pm_y),
+                        Pos2::new(minimap_inner.right(), mm_pm_y),
+                    ],
+                    Stroke::new(0.8, pal.grid_line),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(minimap_inner.left(), mm_nm_y),
+                        Pos2::new(minimap_inner.right(), mm_nm_y),
+                    ],
+                    Stroke::new(0.8, pal.grid_line),
+                );
+
+                for edge in &wl.edges {
+                    if let (Some(&wp1), Some(&wp2)) =
+                        (world_positions.get(&edge.from), world_positions.get(&edge.to))
+                    {
+                        painter.line_segment(
+                            [map_to_mini(wp1.x, wp1.y), map_to_mini(wp2.x, wp2.y)],
+                            Stroke::new(0.7, Color32::from_rgba_unmultiplied(120, 136, 160, 110)),
+                        );
+                    }
+                }
+
+                for (nid, &wpos) in &world_positions {
+                    let is_sel = self.selected_pathway_node.as_deref() == Some(nid.as_str());
+                    let dot_col = if is_sel {
+                        Color32::from_rgb(250, 204, 21)
+                    } else if let Some(st) = map_res.states.get(nid) {
+                        if let Some(fc) = st.observed_log2fc {
+                            pal.color_for_log2fc(fc)
+                        } else {
+                            pal.color_for_activity(st.predicted_activity)
+                        }
+                    } else {
+                        pal.neutral_node
+                    };
+                    painter.circle_filled(
+                        map_to_mini(wpos.x, wpos.y),
+                        if is_sel { 3.2 } else { 2.1 },
+                        dot_col,
+                    );
+                }
+
+                // Live viewport box inside Mini-Map
+                let w_tl = screen_to_world(rect.min);
+                let w_br = screen_to_world(rect.max);
+                let v_tl = map_to_mini(w_tl.x, w_tl.y);
+                let v_br = map_to_mini(w_br.x, w_br.y);
+                let vp_rect = Rect::from_min_max(v_tl, v_br).intersect(minimap_inner);
+                painter.rect_filled(
+                    vp_rect,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(56, 189, 248, 34),
+                );
+                painter.rect_stroke(
+                    vp_rect,
+                    2.0,
+                    Stroke::new(1.4, Color32::from_rgb(56, 189, 248)),
+                );
+                painter.text(
+                    Pos2::new(minimap_rect.left() + 5.0, minimap_rect.top() + 3.0),
+                    Align2::LEFT_TOP,
+                    "MINI-MAP",
+                    FontId::proportional(8.5),
+                    pal.text_muted,
+                );
+            });
         });
     }
 
@@ -1603,187 +2634,170 @@ MAP Activity: {:+.2}",
         pal: &ScientificPalette,
         actions: &mut Vec<GuiAction>,
     ) {
-        let Self {
-            reports,
-            cohorts,
-            active_cohort_idx,
-            config,
-            kg,
-            regulator_search,
-            selected_ura_idx,
-            mechanistic_node_offsets,
-            ..
-        } = self;
+        let rep = self.reports[self.active_cohort_idx].clone();
+        let sel_u_idx = self.selected_ura_idx;
+        let total_avail_h = ui.available_height().max(380.0);
 
-        let rep = &reports[*active_cohort_idx];
-        let sel_u_idx = *selected_ura_idx;
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(560.0, total_avail_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |left_ui| {
+                    left_ui.horizontal(|ui| {
+                        ui.heading("Upstream Regulators (URA)");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.regulator_search)
+                                .hint_text("Filter...")
+                                .desired_width(150.0),
+                        );
+                    });
+                    let needle = self.regulator_search.trim().to_uppercase();
 
-        ui.columns(2, |cols| {
-            cols[0].horizontal(|ui| {
-                ui.heading("Upstream Regulators (URA)");
-                ui.text_edit_singleline(regulator_search);
-            });
-            let needle = regulator_search.trim().to_uppercase();
-
-            cols[0].push_id("ura_table_scroll", |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(310.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("ura_grid")
-                            .striped(true)
-                            .num_columns(7)
-                            .spacing([10.0, 5.0])
+                    left_ui.push_id("ura_table_scroll", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height((total_avail_h * 0.44).max(210.0))
                             .show(ui, |ui| {
-                                ui.strong("Regulator");
-                                ui.strong("Type");
-                                ui.strong("State");
-                                ui.strong("Act Z");
-                                ui.strong("Bias Z");
-                                ui.strong("Overlap P");
-                                ui.strong("Targets");
-                                ui.end_row();
+                                egui::Grid::new("ura_grid")
+                                    .striped(true)
+                                    .num_columns(7)
+                                    .spacing([10.0, 5.0])
+                                    .show(ui, |ui| {
+                                        ui.strong("Regulator");
+                                        ui.strong("Type");
+                                        ui.strong("State");
+                                        ui.strong("Act Z");
+                                        ui.strong("Bias Z");
+                                        ui.strong("Overlap P");
+                                        ui.strong("Targets");
+                                        ui.end_row();
 
-                                for (idx, h) in rep.upstream_regulators.iter().enumerate() {
-                                    if !needle.is_empty() && !h.regulator_id.contains(&needle) {
-                                        continue;
-                                    }
-                                    let sel = sel_u_idx == idx;
-                                    if ui.selectable_label(sel, &h.regulator_id).clicked() {
-                                        actions.push(GuiAction::SelectUraIndex(idx));
-                                    }
-                                    ui.label(h.kind.label());
-                                    let st_col = match h.predicted_state {
-                                        PredictedState::Activated => pal.activated_strong,
-                                        PredictedState::Inhibited => pal.inhibited_strong,
-                                        PredictedState::Neutral => pal.text_muted,
-                                    };
-                                    ui.colored_label(st_col, h.predicted_state.label());
-                                    let skew_mark = if h.skew_flagged { "*" } else { "" };
-                                    ui.colored_label(
-                                        st_col,
-                                        format!("{:+.2}{skew_mark}", h.activation_z),
-                                    );
-                                    ui.label(format!("{:+.2}", h.bias_corrected_z));
-                                    ui.label(format!("{:.2e}", h.p_value));
-                                    ui.label(format!("{}/{}", h.overlap_count, h.regulon_size));
-                                    ui.end_row();
-                                }
+                                        for (idx, h) in rep.upstream_regulators.iter().enumerate() {
+                                            if !needle.is_empty()
+                                                && !h.regulator_id.contains(&needle)
+                                            {
+                                                continue;
+                                            }
+                                            let sel = sel_u_idx == idx;
+                                            if ui.selectable_label(sel, &h.regulator_id).clicked()
+                                            {
+                                                actions.push(GuiAction::SelectUraIndex(idx));
+                                            }
+                                            ui.label(h.kind.label());
+                                            let st_col = match h.predicted_state {
+                                                PredictedState::Activated => pal.activated_strong,
+                                                PredictedState::Inhibited => pal.inhibited_strong,
+                                                PredictedState::Neutral => pal.text_muted,
+                                            };
+                                            ui.colored_label(st_col, h.predicted_state.label());
+                                            let skew_mark = if h.skew_flagged { "*" } else { "" };
+                                            ui.colored_label(
+                                                st_col,
+                                                format!("{:+.2}{skew_mark}", h.activation_z),
+                                            );
+                                            ui.label(format!("{:+.2}", h.bias_corrected_z));
+                                            ui.label(format!("{:.2e}", h.p_value));
+                                            ui.label(format!(
+                                                "{}/{}",
+                                                h.overlap_count, h.regulon_size
+                                            ));
+                                            ui.end_row();
+                                        }
+                                    });
                             });
                     });
-            });
 
-            if let Some(sel_u) = rep.upstream_regulators.get(sel_u_idx) {
-                cols[0].separator();
-                cols[0].label(
-                    RichText::new(format!(
-                        "Target Evidence for {} ({})",
-                        sel_u.regulator_name,
-                        sel_u.mechanistic_summary.as_deref().unwrap_or("Direct regulon")
-                    ))
-                    .strong(),
-                );
-                cols[0].push_id("ura_targets_scroll", |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        egui::Grid::new("ura_ev_grid")
-                            .striped(true)
-                            .num_columns(5)
-                            .spacing([12.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.strong("Target");
-                                ui.strong("Known Edge");
-                                ui.strong("Dataset log2FC");
-                                ui.strong("Match");
-                                ui.strong("Stream");
-                                ui.end_row();
-                                for ev in &sel_u.target_evidences {
-                                    ui.label(&ev.target_gene);
-                                    ui.label(match ev.edge_sign {
-                                        EdgeSign::Activating => "Activates (+1)",
-                                        EdgeSign::Inhibiting => "Inhibits (-1)",
-                                        EdgeSign::Ambiguous => "Binding (0)",
+                    if let Some(sel_u) = rep.upstream_regulators.get(sel_u_idx) {
+                        left_ui.separator();
+                        left_ui.label(
+                            RichText::new(format!(
+                                "Target Evidence for {} ({})",
+                                sel_u.regulator_name,
+                                sel_u.mechanistic_summary.as_deref().unwrap_or("Direct regulon")
+                            ))
+                            .strong(),
+                        );
+                        left_ui.push_id("ura_targets_scroll", |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                egui::Grid::new("ura_ev_grid")
+                                    .striped(true)
+                                    .num_columns(5)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.strong("Target");
+                                        ui.strong("Known Edge");
+                                        ui.strong("Dataset log2FC");
+                                        ui.strong("Match");
+                                        ui.strong("Stream");
+                                        ui.end_row();
+                                        for ev in &sel_u.target_evidences {
+                                            ui.label(&ev.target_gene);
+                                            ui.label(match ev.edge_sign {
+                                                EdgeSign::Activating => "Activates (+1)",
+                                                EdgeSign::Inhibiting => "Inhibits (-1)",
+                                                EdgeSign::Ambiguous => "Binding (0)",
+                                            });
+                                            let c = if ev.observed_log2fc > 0.0 {
+                                                pal.expr_up
+                                            } else {
+                                                pal.expr_down
+                                            };
+                                            ui.colored_label(
+                                                c,
+                                                format!("{:+.2}", ev.observed_log2fc),
+                                            );
+                                            ui.label(if ev.consistent {
+                                                "Consistent (+)"
+                                            } else {
+                                                "Opposite (-)"
+                                            });
+                                            ui.label(&ev.source_db);
+                                            ui.end_row();
+                                        }
                                     });
-                                    let c = if ev.observed_log2fc > 0.0 {
-                                        pal.expr_up
-                                    } else {
-                                        pal.expr_down
-                                    };
-                                    ui.colored_label(c, format!("{:+.2}", ev.observed_log2fc));
-                                    ui.label(if ev.consistent {
-                                        "Consistent (+)"
-                                    } else {
-                                        "Opposite (-)"
-                                    });
-                                    ui.label(&ev.source_db);
-                                    ui.end_row();
-                                }
                             });
-                    });
+                        });
+                    }
+                },
+            );
+            ui.separator();
+
+            ui.vertical(|right_ui| {
+                let Some(sel_u) = rep.upstream_regulators.get(sel_u_idx) else {
+                    return;
+                };
+                right_ui.horizontal_wrapped(|ui| {
+                    ui.heading(format!("Mechanistic Network — {}", sel_u.regulator_id));
+                    if ui.button("Fit All").clicked() {
+                        self.ura_fit_pending = true;
+                        self.mechanistic_node_offsets.clear();
+                    }
                 });
-
-                cols[1].heading(format!("Mechanistic Network — {}", sel_u.regulator_id));
-                cols[1].label(
+                right_ui.label(
                     RichText::new(
-                        "Transitive causal cascade connecting upstream co-regulators (drag nodes to rearrange).",
+                        "Radiative-forcing layered cascade connecting upstream co-regulators & targets (scroll to zoom, drag background to pan, drag nodes to pin).",
                     )
                     .size(11.5)
                     .color(pal.text_muted),
                 );
 
-                let active = cohorts[*active_cohort_idx].filter_active(
-                    config.abs_log2fc_cutoff,
-                    config.fdr_cutoff,
-                    kg,
+                let active = self.cohorts[self.active_cohort_idx].filter_active(
+                    self.config.abs_log2fc_cutoff,
+                    self.config.fdr_cutoff,
+                    &self.kg,
                 );
                 let mn = build_mechanistic_network(
                     &sel_u.regulator_id,
                     &rep.upstream_regulators,
                     &active,
-                    kg,
-                    config.mechanistic_breadth,
-                    config.mechanistic_depth,
+                    &self.kg,
+                    self.config.mechanistic_breadth,
+                    self.config.mechanistic_depth,
                 );
-
-                let sz = Vec2::new(
-                    cols[1].available_width().max(280.0),
-                    (cols[1].available_height() - 8.0).max(320.0),
-                );
-                let (resp, painter) = cols[1].allocate_painter(sz, Sense::click_and_drag());
-                let rect = resp.rect;
-                painter.rect_filled(rect, 6.0, pal.bg_canvas);
-                painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
-
-                let center = rect.center();
-                let mut node_pos: BTreeMap<String, Pos2> = BTreeMap::new();
-
-                let root_base = Pos2::new(center.x, rect.top() + 58.0);
-                let root_off = mechanistic_node_offsets
-                    .get(&mn.root_regulator)
-                    .copied()
-                    .unwrap_or(Vec2::ZERO);
-                node_pos.insert(mn.root_regulator.clone(), root_base + root_off);
-
-                let other_regs: Vec<&String> = mn
-                    .regulator_ids
-                    .iter()
-                    .filter(|r| *r != &mn.root_regulator)
-                    .collect();
-                for (i, r) in other_regs.iter().enumerate() {
-                    let frac = (i as f32 + 0.5) / (other_regs.len().max(1) as f32);
-                    let base = Pos2::new(
-                        rect.left() + 65.0 + frac * (rect.width() - 130.0),
-                        rect.top() + rect.height() * 0.42,
-                    );
-                    let off = mechanistic_node_offsets
-                        .get(*r)
-                        .copied()
-                        .unwrap_or(Vec2::ZERO);
-                    node_pos.insert((*r).clone(), base + off);
-                }
 
                 let shown_targets: Vec<TargetGeneRef<'_>> = sel_u
                     .target_evidences
                     .iter()
-                    .take(10)
+                    .take(14)
                     .map(|t| TargetGeneRef {
                         sym: &t.target_gene,
                         fc: t.observed_log2fc,
@@ -1791,31 +2805,117 @@ MAP Activity: {:+.2}",
                     })
                     .collect();
 
-                for (i, tg) in shown_targets.iter().enumerate() {
-                    let frac = (i as f32 + 0.5) / (shown_targets.len().max(1) as f32);
-                    let base = Pos2::new(
-                        rect.left() + 45.0 + frac * (rect.width() - 90.0),
-                        rect.bottom() - 56.0,
-                    );
-                    let off = mechanistic_node_offsets
-                        .get(tg.sym)
-                        .copied()
-                        .unwrap_or(Vec2::ZERO);
-                    node_pos.insert(tg.sym.to_string(), base + off);
+                let mut tier_nodes = vec![TieredNodeSpec {
+                    id: mn.root_regulator.clone(),
+                    tier: 0,
+                }];
+                let mut layout_edges = Vec::new();
+                for r in &mn.regulator_ids {
+                    if r != &mn.root_regulator {
+                        tier_nodes.push(TieredNodeSpec {
+                            id: r.clone(),
+                            tier: 1,
+                        });
+                    }
+                }
+                for e in &mn.edges {
+                    layout_edges.push((e.from_regulator.clone(), e.to_regulator.clone()));
+                }
+                for tg in &shown_targets {
+                    if !tier_nodes.iter().any(|n| n.id == tg.sym) {
+                        tier_nodes.push(TieredNodeSpec {
+                            id: tg.sym.to_string(),
+                            tier: 2,
+                        });
+                    }
+                    layout_edges.push((mn.root_regulator.clone(), tg.sym.to_string()));
                 }
 
-                if resp.dragged() {
-                    if let Some(ptr) = resp.interact_pointer_pos() {
-                        let delta = resp.drag_delta();
-                        if let Some((best_id, _)) =
-                            node_pos.iter().find(|(_, &p)| p.distance(ptr) <= 32.0)
-                        {
-                            let entry = mechanistic_node_offsets
-                                .entry(best_id.clone())
-                                .or_insert(Vec2::ZERO);
-                            *entry += delta;
+                let tiered = compute_tiered_causal_layout(
+                    &format!("ura_{}_{}", self.active_cohort_idx, sel_u.regulator_id),
+                    &tier_nodes,
+                    &layout_edges,
+                    MIN_NODE_DX,
+                    MIN_NODE_DY,
+                );
+
+                let sz = Vec2::new(
+                    right_ui.available_width().max(280.0),
+                    (right_ui.available_height() - 8.0).max(320.0),
+                );
+                let (resp, painter) = right_ui.allocate_painter(sz, Sense::click_and_drag());
+                let rect = resp.rect;
+                let painter = painter.with_clip_rect(rect);
+                painter.rect_filled(rect, 6.0, pal.bg_canvas);
+                painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+
+                let world_center = Pos2::new(tiered.world_w * 0.5, tiered.world_h * 0.5);
+                if self.ura_fit_pending {
+                    self.ura_zoom = ((rect.width() - 32.0) / tiered.world_w)
+                        .min((rect.height() - 32.0) / tiered.world_h)
+                        .clamp(0.15, 3.5);
+                    self.ura_pan = Vec2::ZERO;
+                    self.ura_fit_pending = false;
+                }
+                if resp.hovered() {
+                    let scroll_y = right_ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll_y.abs() > 0.1 {
+                        let old_zoom = self.ura_zoom;
+                        let factor = (1.0 + scroll_y * 0.0022).clamp(0.80, 1.25);
+                        let new_zoom = (old_zoom * factor).clamp(0.15, 3.5);
+                        if let Some(cursor) = right_ui.input(|i| i.pointer.hover_pos()) {
+                            let w_under = Pos2::new(
+                                world_center.x
+                                    + (cursor.x - rect.center().x - self.ura_pan.x)
+                                        / old_zoom.max(0.05),
+                                world_center.y
+                                    + (cursor.y - rect.center().y - self.ura_pan.y)
+                                        / old_zoom.max(0.05),
+                            );
+                            self.ura_pan = Vec2::new(
+                                cursor.x - rect.center().x - (w_under.x - world_center.x) * new_zoom,
+                                cursor.y - rect.center().y - (w_under.y - world_center.y) * new_zoom,
+                            );
                         }
+                        self.ura_zoom = new_zoom;
                     }
+                }
+
+                let zoom = self.ura_zoom;
+                let pan = self.ura_pan;
+                let mut node_pos: BTreeMap<String, Pos2> = BTreeMap::new();
+                for (nid, &(wx, wy)) in &tiered.positions {
+                    let off = self
+                        .mechanistic_node_offsets
+                        .get(nid)
+                        .copied()
+                        .unwrap_or(Vec2::ZERO);
+                    let sx = rect.center().x + pan.x + (wx + off.x - world_center.x) * zoom;
+                    let sy = rect.center().y + pan.y + (wy + off.y - world_center.y) * zoom;
+                    node_pos.insert(nid.clone(), Pos2::new(sx, sy));
+                }
+
+                if resp.drag_started() {
+                    if let Some(ptr) = resp.interact_pointer_pos() {
+                        self.dragging_ura_node = node_pos
+                            .iter()
+                            .find(|(_, &p)| p.distance(ptr) <= (32.0 * zoom).max(18.0))
+                            .map(|(k, _)| k.clone());
+                    }
+                }
+                if resp.dragged() {
+                    if let Some(ref drag_id) = self.dragging_ura_node {
+                        let entry = self
+                            .mechanistic_node_offsets
+                            .entry(drag_id.clone())
+                            .or_insert(Vec2::ZERO);
+                        *entry += resp.drag_delta() / self.ura_zoom.max(0.05);
+                    } else {
+                        self.ura_pan += resp.drag_delta();
+                    }
+                }
+                if resp.drag_stopped() {
+                    self.dragging_ura_node = None;
                 }
 
                 for e in &mn.edges {
@@ -1828,27 +2928,32 @@ MAP Activity: {:+.2}",
                             EdgeSign::Inhibiting => pal.inhibited_strong,
                             EdgeSign::Ambiguous => pal.border_default,
                         };
-                        draw_directed_causal_edge(
+                        draw_bezier_causal_edge(
                             &painter,
                             p1,
                             p2,
-                            24.0,
+                            (22.0 * zoom).clamp(10.0, 32.0),
+                            (24.0 * zoom).clamp(12.0, 34.0),
+                            18.0 * zoom,
                             e.sign,
-                            Stroke::new(2.2, c),
+                            Stroke::new((2.2 * zoom).clamp(1.2, 2.8), c),
                         );
                     }
                 }
 
                 if let Some(&rp) = node_pos.get(&mn.root_regulator) {
-                    for tg in &shown_targets {
+                    for (idx, tg) in shown_targets.iter().enumerate() {
                         if let Some(&tp) = node_pos.get(tg.sym) {
-                            draw_directed_causal_edge(
+                            let bow = ((idx as f32) - (shown_targets.len() as f32) * 0.5) * 4.5 * zoom;
+                            draw_bezier_causal_edge(
                                 &painter,
                                 rp,
                                 tp,
-                                20.0,
+                                (18.0 * zoom).clamp(8.0, 28.0),
+                                (20.0 * zoom).clamp(10.0, 30.0),
+                                bow,
                                 tg.sign,
-                                Stroke::new(1.1, pal.grid_line),
+                                Stroke::new((1.25 * zoom).clamp(0.8, 1.8), pal.grid_line),
                             );
                         }
                     }
@@ -1857,7 +2962,8 @@ MAP Activity: {:+.2}",
                 for rid in &mn.regulator_ids {
                     if let Some(&p) = node_pos.get(rid) {
                         let z = mn.regulator_z_scores.get(rid).copied().unwrap_or(0.0);
-                        let kind = kg
+                        let kind = self
+                            .kg
                             .nodes
                             .get(rid)
                             .map(|n| n.kind)
@@ -1865,7 +2971,7 @@ MAP Activity: {:+.2}",
                         draw_entity_glyph(
                             &painter,
                             p,
-                            Vec2::new(32.0, 16.0),
+                            Vec2::new((34.0 * zoom).max(20.0), (17.0 * zoom).max(11.0)),
                             kind,
                             pal.color_for_z(z),
                             Stroke::new(2.0, pal.text_primary),
@@ -1874,7 +2980,7 @@ MAP Activity: {:+.2}",
                             p,
                             Align2::CENTER_CENTER,
                             rid,
-                            FontId::proportional(11.0),
+                            FontId::proportional((11.0 * zoom).clamp(8.5, 14.0)),
                             pal.text_primary,
                         );
                     }
@@ -1885,7 +2991,7 @@ MAP Activity: {:+.2}",
                         draw_entity_glyph(
                             &painter,
                             p,
-                            Vec2::new(25.0, 13.0),
+                            Vec2::new((28.0 * zoom).max(18.0), (14.0 * zoom).max(10.0)),
                             EntityKind::GeneOther,
                             pal.color_for_log2fc(tg.fc),
                             Stroke::new(1.3, pal.border_default),
@@ -1894,12 +3000,12 @@ MAP Activity: {:+.2}",
                             p,
                             Align2::CENTER_CENTER,
                             tg.sym,
-                            FontId::proportional(10.0),
+                            FontId::proportional((10.0 * zoom).clamp(8.0, 13.0)),
                             pal.text_primary,
                         );
                     }
                 }
-            }
+            });
         });
     }
 
@@ -2114,14 +3220,20 @@ MAP Activity: {:+.2}",
     }
 
     fn render_regulator_effects_tab(
-        &self,
+        &mut self,
         ui: &mut Ui,
         pal: &ScientificPalette,
         actions: &mut Vec<GuiAction>,
     ) {
-        let rep = &self.reports[self.active_cohort_idx];
-        ui.heading("Regulator Effects — 3-Tier Causal Mechanism Explorer");
-        ui.horizontal(|ui| {
+        let rep = self.reports[self.active_cohort_idx].clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Regulator Effects — 3-Tier Causal Mechanism Explorer");
+            if ui.button("Fit All").clicked() {
+                self.re_fit_pending = true;
+                self.re_node_offsets.clear();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
             ui.label("Select Causal Flow Hypothesis:");
             for (idx, re) in rep.regulator_effects.iter().take(8).enumerate() {
                 let title = re
@@ -2139,130 +3251,230 @@ MAP Activity: {:+.2}",
         });
 
         if let Some(hit) = rep.regulator_effects.get(self.selected_reg_effect_idx) {
+            let mut tier_nodes = Vec::new();
+            let mut layout_edges = Vec::new();
+
+            for (rid, _) in &hit.regulators {
+                tier_nodes.push(TieredNodeSpec {
+                    id: rid.clone(),
+                    tier: 0,
+                });
+            }
+            for (gid, _) in hit.shared_dataset_targets.iter().take(24) {
+                if !tier_nodes.iter().any(|n| n.id == *gid) {
+                    tier_nodes.push(TieredNodeSpec {
+                        id: gid.clone(),
+                        tier: 1,
+                    });
+                }
+                for (rid, _) in &hit.regulators {
+                    layout_edges.push((rid.clone(), gid.clone()));
+                }
+            }
+            for (_pid, pname, _) in &hit.downstream_phenotypes {
+                let key = format!("PHENO::{pname}");
+                tier_nodes.push(TieredNodeSpec {
+                    id: key.clone(),
+                    tier: 2,
+                });
+                for (gid, _) in hit.shared_dataset_targets.iter().take(24) {
+                    layout_edges.push((gid.clone(), key.clone()));
+                }
+            }
+
+            let tiered = compute_tiered_causal_layout(
+                &format!("reg_eff_{}_{}", self.active_cohort_idx, self.selected_reg_effect_idx),
+                &tier_nodes,
+                &layout_edges,
+                196.0,
+                52.0,
+            );
+
             let sz = Vec2::new(
                 ui.available_width().max(320.0),
                 (ui.available_height() - 12.0).max(340.0),
             );
-            let (resp, painter) = ui.allocate_painter(sz, Sense::hover());
+            let (resp, painter) = ui.allocate_painter(sz, Sense::click_and_drag());
             let rect = resp.rect;
+            let painter = painter.with_clip_rect(rect);
             painter.rect_filled(rect, 6.0, pal.bg_canvas);
             painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
 
-            let y_top = rect.top() + 58.0;
-            let y_mid = rect.center().y;
-            let y_bot = rect.bottom() - 62.0;
-
-            let mut reg_pts = Vec::new();
-            for (i, (rid, z)) in hit.regulators.iter().enumerate() {
-                let frac = (i as f32 + 0.5) / (hit.regulators.len().max(1) as f32);
-                let p = Pos2::new(rect.left() + 120.0 + frac * (rect.width() - 240.0), y_top);
-                reg_pts.push((rid.as_str(), *z, p));
+            let world_center = Pos2::new(tiered.world_w * 0.5, tiered.world_h * 0.5);
+            if self.re_fit_pending {
+                self.re_zoom = ((rect.width() - 32.0) / tiered.world_w)
+                    .min((rect.height() - 32.0) / tiered.world_h)
+                    .clamp(0.15, 3.5);
+                self.re_pan = Vec2::ZERO;
+                self.re_fit_pending = false;
+            }
+            if resp.hovered() {
+                let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll_y.abs() > 0.1 {
+                    let old_zoom = self.re_zoom;
+                    let factor = (1.0 + scroll_y * 0.0022).clamp(0.80, 1.25);
+                    let new_zoom = (old_zoom * factor).clamp(0.15, 3.5);
+                    if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
+                        let w_under = Pos2::new(
+                            world_center.x
+                                + (cursor.x - rect.center().x - self.re_pan.x)
+                                    / old_zoom.max(0.05),
+                            world_center.y
+                                + (cursor.y - rect.center().y - self.re_pan.y)
+                                    / old_zoom.max(0.05),
+                        );
+                        self.re_pan = Vec2::new(
+                            cursor.x - rect.center().x - (w_under.x - world_center.x) * new_zoom,
+                            cursor.y - rect.center().y - (w_under.y - world_center.y) * new_zoom,
+                        );
+                    }
+                    self.re_zoom = new_zoom;
+                }
             }
 
-            let mut gene_pts = Vec::new();
-            for (i, (gid, fc)) in hit.shared_dataset_targets.iter().take(12).enumerate() {
-                let n = hit.shared_dataset_targets.len().min(12).max(1) as f32;
-                let frac = (i as f32 + 0.5) / n;
-                let p = Pos2::new(rect.left() + 45.0 + frac * (rect.width() - 90.0), y_mid);
-                gene_pts.push((gid.as_str(), *fc, p));
+            let zoom = self.re_zoom;
+            let pan = self.re_pan;
+            let mut node_pos: BTreeMap<String, Pos2> = BTreeMap::new();
+            for (nid, &(wx, wy)) in &tiered.positions {
+                let off = self.re_node_offsets.get(nid).copied().unwrap_or(Vec2::ZERO);
+                let sx = rect.center().x + pan.x + (wx + off.x - world_center.x) * zoom;
+                let sy = rect.center().y + pan.y + (wy + off.y - world_center.y) * zoom;
+                node_pos.insert(nid.clone(), Pos2::new(sx, sy));
             }
 
-            let mut pheno_pts = Vec::new();
-            for (i, (_pid, pname, pz)) in hit.downstream_phenotypes.iter().enumerate() {
-                let n = hit.downstream_phenotypes.len().max(1) as f32;
-                let frac = (i as f32 + 0.5) / n;
-                let p = Pos2::new(rect.left() + 90.0 + frac * (rect.width() - 180.0), y_bot);
-                pheno_pts.push((pname.as_str(), *pz, p));
+            if resp.drag_started() {
+                if let Some(ptr) = resp.interact_pointer_pos() {
+                    self.dragging_re_node = node_pos
+                        .iter()
+                        .find(|(_, &p)| p.distance(ptr) <= (38.0 * zoom).max(18.0))
+                        .map(|(k, _)| k.clone());
+                }
+            }
+            if resp.dragged() {
+                if let Some(ref drag_id) = self.dragging_re_node {
+                    let entry = self
+                        .re_node_offsets
+                        .entry(drag_id.clone())
+                        .or_insert(Vec2::ZERO);
+                    *entry += resp.drag_delta() / self.re_zoom.max(0.05);
+                } else {
+                    self.re_pan += resp.drag_delta();
+                }
+            }
+            if resp.drag_stopped() {
+                self.dragging_re_node = None;
             }
 
-            for &(_, z, rp) in &reg_pts {
-                let s = if z >= 0.0 {
+            for (rid, z) in &hit.regulators {
+                let Some(&rp) = node_pos.get(rid) else {
+                    continue;
+                };
+                let s = if *z >= 0.0 {
                     EdgeSign::Activating
                 } else {
                     EdgeSign::Inhibiting
                 };
-                for &(_, _, gp) in &gene_pts {
-                    draw_directed_causal_edge(
+                for (gid, _) in hit.shared_dataset_targets.iter().take(24) {
+                    if let Some(&gp) = node_pos.get(gid) {
+                        draw_bezier_causal_edge(
+                            &painter,
+                            rp,
+                            gp,
+                            (18.0 * zoom).clamp(8.0, 28.0),
+                            (20.0 * zoom).clamp(10.0, 30.0),
+                            14.0 * zoom,
+                            s,
+                            Stroke::new((1.5 * zoom).clamp(0.9, 2.2), pal.color_for_z(*z)),
+                        );
+                    }
+                }
+            }
+
+            for (gid, _) in hit.shared_dataset_targets.iter().take(24) {
+                let Some(&gp) = node_pos.get(gid) else {
+                    continue;
+                };
+                for (_pid, pname, pz) in &hit.downstream_phenotypes {
+                    let key = format!("PHENO::{pname}");
+                    if let Some(&pp) = node_pos.get(&key) {
+                        let s = if *pz >= 0.0 {
+                            EdgeSign::Activating
+                        } else {
+                            EdgeSign::Inhibiting
+                        };
+                        draw_bezier_causal_edge(
+                            &painter,
+                            gp,
+                            pp,
+                            (16.0 * zoom).clamp(8.0, 26.0),
+                            (24.0 * zoom).clamp(10.0, 34.0),
+                            -14.0 * zoom,
+                            s,
+                            Stroke::new((1.5 * zoom).clamp(0.9, 2.2), pal.color_for_z(*pz)),
+                        );
+                    }
+                }
+            }
+
+            for (rid, z) in &hit.regulators {
+                if let Some(&p) = node_pos.get(rid) {
+                    draw_entity_glyph(
                         &painter,
-                        rp,
-                        gp,
-                        20.0,
-                        s,
-                        Stroke::new(1.5, pal.color_for_z(z)),
+                        p,
+                        Vec2::new((42.0 * zoom).max(24.0), (18.0 * zoom).max(11.0)),
+                        EntityKind::TranscriptionRegulator,
+                        pal.color_for_z(*z),
+                        Stroke::new(2.0, pal.text_primary),
+                    );
+                    painter.text(
+                        p,
+                        Align2::CENTER_CENTER,
+                        rid,
+                        FontId::proportional((11.5 * zoom).clamp(8.5, 14.0)),
+                        pal.text_primary,
                     );
                 }
             }
 
-            for &(_, _, gp) in &gene_pts {
-                for &(_, pz, pp) in &pheno_pts {
-                    let s = if pz >= 0.0 {
-                        EdgeSign::Activating
-                    } else {
-                        EdgeSign::Inhibiting
-                    };
-                    draw_directed_causal_edge(
+            for (gid, fc) in hit.shared_dataset_targets.iter().take(24) {
+                if let Some(&p) = node_pos.get(gid) {
+                    draw_entity_glyph(
                         &painter,
-                        gp,
-                        pp,
-                        24.0,
-                        s,
-                        Stroke::new(1.5, pal.color_for_z(pz)),
+                        p,
+                        Vec2::new((28.0 * zoom).max(18.0), (14.0 * zoom).max(9.0)),
+                        EntityKind::GeneOther,
+                        pal.color_for_log2fc(*fc),
+                        Stroke::new(1.5, pal.text_primary),
+                    );
+                    painter.text(
+                        p,
+                        Align2::CENTER_CENTER,
+                        gid,
+                        FontId::proportional((10.5 * zoom).clamp(8.0, 13.0)),
+                        pal.text_primary,
                     );
                 }
             }
 
-            for (rid, z, p) in reg_pts {
-                draw_entity_glyph(
-                    &painter,
-                    p,
-                    Vec2::new(42.0, 18.0),
-                    EntityKind::TranscriptionRegulator,
-                    pal.color_for_z(z),
-                    Stroke::new(2.0, pal.text_primary),
-                );
-                painter.text(
-                    p,
-                    Align2::CENTER_CENTER,
-                    rid,
-                    FontId::proportional(11.5),
-                    pal.text_primary,
-                );
-            }
-
-            for (gid, fc, p) in gene_pts {
-                draw_entity_glyph(
-                    &painter,
-                    p,
-                    Vec2::new(28.0, 14.0),
-                    EntityKind::GeneOther,
-                    pal.color_for_log2fc(fc),
-                    Stroke::new(1.5, pal.text_primary),
-                );
-                painter.text(
-                    p,
-                    Align2::CENTER_CENTER,
-                    gid,
-                    FontId::proportional(10.5),
-                    pal.text_primary,
-                );
-            }
-
-            for (pname, pz, p) in pheno_pts {
-                draw_entity_glyph(
-                    &painter,
-                    p,
-                    Vec2::new(92.0, 19.0),
-                    EntityKind::BiologicalProcess,
-                    pal.color_for_z(pz),
-                    Stroke::new(2.0, pal.text_primary),
-                );
-                painter.text(
-                    p,
-                    Align2::CENTER_CENTER,
-                    pname,
-                    FontId::proportional(10.5),
-                    pal.text_primary,
-                );
+            for (_pid, pname, pz) in &hit.downstream_phenotypes {
+                let key = format!("PHENO::{pname}");
+                if let Some(&p) = node_pos.get(&key) {
+                    draw_entity_glyph(
+                        &painter,
+                        p,
+                        Vec2::new((92.0 * zoom).max(46.0), (19.0 * zoom).max(12.0)),
+                        EntityKind::BiologicalProcess,
+                        pal.color_for_z(*pz),
+                        Stroke::new(2.0, pal.text_primary),
+                    );
+                    painter.text(
+                        p,
+                        Align2::CENTER_CENTER,
+                        pname,
+                        FontId::proportional((10.5 * zoom).clamp(8.0, 13.0)),
+                        pal.text_primary,
+                    );
+                }
             }
         } else {
             ui.label("No multi-tier Regulator Effects pass current significance thresholds.");
@@ -2561,4 +3773,45 @@ struct TargetGeneRef<'a> {
     sym: &'a str,
     fc: f64,
     sign: EdgeSign,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omnibox_jump_and_five_pillars_render_headless() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "causal_atlas_gui_test_{}.sqlite3",
+            std::process::id()
+        ));
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+        assert_eq!(WorkbenchTab::ALL.len(), 5);
+
+        app.apply_action(
+            &ctx,
+            GuiAction::JumpToGene {
+                symbol: "VCAM1".to_string(),
+                pathway_id: Some("WP445".to_string()),
+            },
+        );
+        assert_eq!(app.active_tab, WorkbenchTab::PathwayAtlas);
+        assert_eq!(app.selected_pathway_node.as_deref(), Some("VCAM1"));
+        assert_eq!(app.omnibox_selected_gene.as_deref(), Some("VCAM1"));
+        assert_eq!(app.highlight_pulse_gene.as_deref(), Some("VCAM1"));
+
+        for view in [1u8, 2, 3] {
+            app.configure_screenshot_view(&ctx, view);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |c| app.render_ui_frame(c));
+        }
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
 }

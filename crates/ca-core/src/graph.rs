@@ -214,84 +214,11 @@ pub struct PathwayDef {
 }
 
 impl PathwayDef {
-    /// Returns spacious `(x, y)` normalized coordinates in `[0.05, 0.95]`, preserving explicit GPML/curated
-    /// coordinates when available and computing a multi-column vertical signaling cascade layout otherwise.
+    /// Returns spacious `(x, y)` normalized coordinates in `[0.02, 0.98]`, preserving explicit GPML/curated
+    /// coordinates when available and computing a deterministic non-overlapping radiative-forcing
+    /// subcellular compartment layout otherwise.
     pub fn resolve_layout_coords(&self, kg: &KnowledgeGraph) -> BTreeMap<String, (f32, f32)> {
-        let mut all_ids: BTreeSet<String> = self.members.iter().cloned().collect();
-        for e in &self.topology_edges {
-            all_ids.insert(e.from.clone());
-            all_ids.insert(e.to.clone());
-        }
-
-        let mut out = BTreeMap::new();
-        let mut unplaced_by_band: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-
-        for nid in &all_ids {
-            if let Some(&xy) = self.node_coords.get(nid) {
-                out.insert(nid.clone(), xy);
-            } else {
-                let b = kg
-                    .nodes
-                    .get(nid)
-                    .map(|n| n.location.band_index().min(3))
-                    .unwrap_or(2);
-                unplaced_by_band.entry(b).or_default().push(nid.clone());
-            }
-        }
-
-        // Compute topological hop depth within Cytoplasm (band 2) so cascades flow vertically in parallel lanes!
-        if let Some(cyto_nodes) = unplaced_by_band.remove(&2) {
-            let cyto_set: BTreeSet<String> = cyto_nodes.iter().cloned().collect();
-            let mut depth_map: BTreeMap<String, usize> = BTreeMap::new();
-            for n in &cyto_nodes {
-                depth_map.insert(n.clone(), 0);
-            }
-            for _ in 0..6 {
-                for e in &self.topology_edges {
-                    if cyto_set.contains(&e.from) && cyto_set.contains(&e.to) {
-                        let d_from = depth_map.get(&e.from).copied().unwrap_or(0);
-                        let entry = depth_map.entry(e.to.clone()).or_insert(0);
-                        if *entry <= d_from {
-                            *entry = (d_from + 1).min(4);
-                        }
-                    }
-                }
-            }
-            let mut tiers: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-            for n in cyto_nodes {
-                let d = depth_map.get(&n).copied().unwrap_or(0);
-                tiers.entry(d).or_default().push(n);
-            }
-            let tier_cnt = tiers.len().max(1);
-            for (t_idx, (_, t_nodes)) in tiers.into_iter().enumerate() {
-                let y = 0.29 + ((t_idx as f32 + 0.4) / (tier_cnt as f32)) * 0.36;
-                let cols = t_nodes.len().max(1);
-                for (c_idx, nid) in t_nodes.into_iter().enumerate() {
-                    let x = 0.14 + ((c_idx as f32 + 0.5) / (cols as f32)) * 0.72;
-                    out.insert(nid, (x, y));
-                }
-            }
-        }
-
-        for (band, b_nodes) in unplaced_by_band {
-            let base_y = match band {
-                0 => 0.06f32,
-                1 => 0.18f32,
-                _ => 0.82f32,
-            };
-            let cols = b_nodes.len().max(1);
-            for (i, nid) in b_nodes.into_iter().enumerate() {
-                let y = if band == 3 && cols > 6 && i % 2 == 1 {
-                    0.87
-                } else {
-                    base_y
-                };
-                let x = 0.12 + ((i as f32 + 0.5) / (cols as f32)) * 0.76;
-                out.insert(nid, (x, y));
-            }
-        }
-
-        out
+        crate::layout::resolve_normalized_pathway_coords(self, kg)
     }
 }
 

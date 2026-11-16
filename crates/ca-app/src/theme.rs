@@ -281,38 +281,143 @@ pub fn draw_directed_causal_edge(
     sign: EdgeSign,
     stroke: Stroke,
 ) {
+    draw_bezier_causal_edge(
+        painter,
+        p1,
+        p2,
+        target_backoff * 0.75,
+        target_backoff,
+        14.0,
+        sign,
+        stroke,
+    );
+}
+
+/// Draws a smooth cubic Bezier directed causal edge between `p1` and `p2` with tangent-aligned
+/// arrowhead (`Activating`), T-bar blunt (`Inhibiting`), or circle (`Ambiguous`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_bezier_causal_edge(
+    painter: &egui::Painter,
+    p1: Pos2,
+    p2: Pos2,
+    source_backoff: f32,
+    target_backoff: f32,
+    curve_offset: f32,
+    sign: EdgeSign,
+    stroke: Stroke,
+) {
     let delta = p2 - p1;
     let dist = delta.length();
-    if dist < target_backoff + 8.0 {
+    if dist < source_backoff + target_backoff + 4.0 {
         return;
     }
     let dir = delta / dist;
     let perp = Vec2::new(-dir.y, dir.x);
-    let start = p1 + dir * (target_backoff * 0.75);
+    let start = p1 + dir * source_backoff;
     let tip = p2 - dir * target_backoff;
+    let chord = tip - start;
+    let chord_len = chord.length().max(1.0);
 
-    painter.line_segment([start, tip], stroke);
+    let (c1, c2) = if chord.y.abs() >= chord.x.abs() * 0.45 {
+        let bow = perp * (curve_offset * 0.65);
+        (
+            Pos2::new(start.x + bow.x, start.y + chord.y * 0.44 + bow.y),
+            Pos2::new(tip.x + bow.x, tip.y - chord.y * 0.44 + bow.y),
+        )
+    } else {
+        let arch = if curve_offset.abs() < 1.0 {
+            (chord_len * 0.16).clamp(12.0, 48.0)
+        } else {
+            curve_offset
+        };
+        (
+            start + dir * (chord_len * 0.28) + perp * arch,
+            tip - dir * (chord_len * 0.28) + perp * arch,
+        )
+    };
+
+    const STEPS: usize = 18;
+    let mut pts = Vec::with_capacity(STEPS + 1);
+    for step in 0..=STEPS {
+        let t = step as f32 / STEPS as f32;
+        let u = 1.0 - t;
+        let b0 = u * u * u;
+        let b1 = 3.0 * u * u * t;
+        let b2 = 3.0 * u * t * t;
+        let b3 = t * t * t;
+        let px = b0 * start.x + b1 * c1.x + b2 * c2.x + b3 * tip.x;
+        let py = b0 * start.y + b1 * c1.y + b2 * c2.y + b3 * tip.y;
+        pts.push(Pos2::new(px, py));
+    }
+
+    let end_delta = pts[STEPS] - pts[STEPS - 2];
+    let end_dir = if end_delta.length_sq() > 1e-4 {
+        end_delta.normalized()
+    } else {
+        dir
+    };
+    let end_perp = Vec2::new(-end_dir.y, end_dir.x);
+
+    painter.add(Shape::line(pts, stroke));
 
     match sign {
         EdgeSign::Activating => {
             let arrow_len = 9.0f32;
             let arrow_half_w = 4.6f32;
-            let base = tip - dir * arrow_len;
-            let pts = vec![
+            let base = tip - end_dir * arrow_len;
+            let tri = vec![
                 tip,
-                base + perp * arrow_half_w,
-                base - perp * arrow_half_w,
+                base + end_perp * arrow_half_w,
+                base - end_perp * arrow_half_w,
             ];
-            painter.add(Shape::convex_polygon(pts, stroke.color, Stroke::NONE));
+            painter.add(Shape::convex_polygon(tri, stroke.color, Stroke::NONE));
         }
         EdgeSign::Inhibiting => {
             let bar_half = 6.5f32;
-            let t1 = tip + perp * bar_half;
-            let t2 = tip - perp * bar_half;
+            let t1 = tip + end_perp * bar_half;
+            let t2 = tip - end_perp * bar_half;
             painter.line_segment([t1, t2], Stroke::new(stroke.width + 1.0, stroke.color));
         }
         EdgeSign::Ambiguous => {
             painter.circle_filled(tip, 3.5, stroke.color);
         }
     }
+}
+
+/// Draws a bright pulsing gold selection/search halo around a matched molecule node.
+pub fn draw_gold_pulse_halo(
+    painter: &egui::Painter,
+    center: Pos2,
+    half_extents: Vec2,
+    phase: f32,
+) {
+    let pulse = 0.5 + 0.5 * (phase * 6.0).sin();
+    let outer_pad = 9.0 + pulse * 5.0;
+    let inner_pad = 5.0 + pulse * 2.0;
+
+    let outer_rect = Rect::from_center_size(
+        center,
+        Vec2::new(
+            half_extents.x * 2.0 + outer_pad * 2.0,
+            half_extents.y * 2.0 + outer_pad * 2.0,
+        ),
+    );
+    painter.rect_stroke(
+        outer_rect,
+        10.0,
+        Stroke::new(2.2_f32, Color32::from_rgba_unmultiplied(250, 204, 21, 145)),
+    );
+
+    let inner_rect = Rect::from_center_size(
+        center,
+        Vec2::new(
+            half_extents.x * 2.0 + inner_pad * 2.0,
+            half_extents.y * 2.0 + inner_pad * 2.0,
+        ),
+    );
+    painter.rect_stroke(
+        inner_rect,
+        8.0,
+        Stroke::new(3.0_f32, Color32::from_rgb(253, 224, 71)),
+    );
 }

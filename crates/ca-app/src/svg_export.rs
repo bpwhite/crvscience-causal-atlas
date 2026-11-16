@@ -16,7 +16,8 @@
 #![forbid(unsafe_code)]
 
 use ca_core::{
-    EdgeSign, KnowledgeGraph, MapSimulationResult, PathwayDef, SubcellularLocation, TreeMapRect,
+    compute_pathway_world_layout_cached, EdgeSign, KnowledgeGraph, MapSimulationResult, PathwayDef,
+    SubcellularLocation, TreeMapRect,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -54,8 +55,9 @@ pub fn render_pathway_map_svg(
     map_res: &MapSimulationResult,
     kg: &KnowledgeGraph,
 ) -> String {
-    let width = 1100.0f32;
-    let height = 700.0f32;
+    let wl = compute_pathway_world_layout_cached(pathway, kg);
+    let width = wl.world_w.max(1100.0);
+    let height = wl.world_h.max(700.0);
     let mut svg = String::with_capacity(16_384);
 
     let _ = writeln!(
@@ -79,43 +81,66 @@ pub fn render_pathway_map_svg(
     );
     let _ = writeln!(
         &mut svg,
-        r##"<text x="28" y="36" font-size="18" font-weight="700" fill="#0F172A">{} ({}) — Subcellular MAP Diagram</text>"##,
+        r##"<text x="28" y="34" font-size="18" font-weight="700" fill="#0F172A">{} ({}) — Subcellular MAP Diagram</text>"##,
         xml_escape(&pathway.name),
         xml_escape(&pathway.id)
     );
 
-    // Clean solid Plasma Membrane (y=155) and Nuclear Envelope (y=515) bars matching publication layout
+    let scale_x = width / wl.world_w.max(1.0);
+    let scale_y = (height - 40.0) / wl.world_h.max(1.0);
+    let pm_y = 40.0 + wl.bands.plasma_membrane_y * scale_y;
+    let org_y = 40.0 + wl.bands.organelle_divider_y * scale_y;
+    let nm_y = 40.0 + wl.bands.nuclear_envelope_y * scale_y;
+
     let _ = writeln!(
         &mut svg,
-        r##"<rect x="36" y="152" width="1028" height="7" fill="#73777D"/>"##
+        r##"<rect x="36" y="{:.1}" width="{:.1}" height="6" fill="#73777D"/>"##,
+        pm_y - 3.0,
+        width - 72.0
     );
     let _ = writeln!(
         &mut svg,
-        r##"<rect x="68" y="512" width="964" height="6" fill="#73777D"/>"##
+        r##"<line x1="56" y1="{org_y:.1}" x2="{:.1}" y2="{org_y:.1}" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="6,4"/>"##,
+        width - 56.0
     );
     let _ = writeln!(
         &mut svg,
-        r##"<text x="38" y="144" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        r##"<rect x="68" y="{:.1}" width="{:.1}" height="6" fill="#73777D"/>"##,
+        nm_y - 3.0,
+        width - 136.0
+    );
+    let _ = writeln!(
+        &mut svg,
+        r##"<text x="38" y="{:.1}" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        pm_y - 10.0,
         SubcellularLocation::Extracellular.label()
     );
     let _ = writeln!(
         &mut svg,
-        r##"<text x="38" y="176" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        r##"<text x="38" y="{:.1}" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        pm_y + 20.0,
         SubcellularLocation::Cytoplasm.label()
     );
     let _ = writeln!(
         &mut svg,
-        r##"<text x="70" y="534" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        r##"<text x="58" y="{:.1}" font-size="11" font-weight="600" fill="#64748B">{}</text>"##,
+        org_y + 15.0,
+        SubcellularLocation::Organelle.label()
+    );
+    let _ = writeln!(
+        &mut svg,
+        r##"<text x="70" y="{:.1}" font-size="12" font-weight="600" fill="#374151">{}</text>"##,
+        nm_y + 20.0,
         SubcellularLocation::Nucleus.label()
     );
 
-    let norm_coords = pathway.resolve_layout_coords(kg);
-    let coords: BTreeMap<String, (f32, f32)> = norm_coords
+    let coords: BTreeMap<String, (f32, f32)> = wl
+        .positions
         .into_iter()
-        .map(|(nid, (nx, ny))| (nid, (54.0 + nx * 992.0, 62.0 + ny * 600.0)))
+        .map(|(nid, (wx, wy))| (nid, (wx * scale_x, 40.0 + wy * scale_y)))
         .collect();
 
-    for edge in &pathway.topology_edges {
+    for edge in &wl.edges {
         if let (Some(&(x1, y1)), Some(&(x2, y2))) = (coords.get(&edge.from), coords.get(&edge.to)) {
             let (stroke, marker) = match edge.sign {
                 EdgeSign::Activating => ("#D95F02", "url(#arrow-act)"),
@@ -127,9 +152,11 @@ pub fn render_pathway_map_svg(
             } else {
                 format!(r#" marker-end="{marker}""#)
             };
+            let mx = (x1 + x2) * 0.5 + (y2 - y1) * 0.08;
+            let my = (y1 + y2) * 0.5 - (x2 - x1) * 0.08;
             let _ = writeln!(
                 &mut svg,
-                r##"<line x1="{x1:.1}" y1="{y1:.1}" x2="{x2:.1}" y2="{y2:.1}" stroke="{stroke}" stroke-width="2.0" opacity="0.82"{marker_attr}/>"##
+                r##"<path d="M {x1:.1} {y1:.1} Q {mx:.1} {my:.1} {x2:.1} {y2:.1}" fill="none" stroke="{stroke}" stroke-width="2.0" opacity="0.82"{marker_attr}/>"##
             );
         }
     }
