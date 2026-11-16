@@ -1,3 +1,18 @@
+// Copyright (C) 2026 CRV Science Network (https://crvscience.com)
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://gnu.org>.
+
 #![forbid(unsafe_code)]
 
 use crate::svg_export::{render_pathway_map_svg, render_treemap_svg};
@@ -158,8 +173,12 @@ pub struct CausalAtlasApp {
 
 impl CausalAtlasApp {
     pub fn new(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Self {
+        Self::new_headless(&cc.egui_ctx, db_path)
+    }
+
+    pub fn new_headless(ctx: &egui::Context, db_path: PathBuf) -> Self {
         let palette_mode = WorkbenchPaletteMode::AcademicDark;
-        apply_workbench_visuals(&cc.egui_ctx, palette_mode);
+        apply_workbench_visuals(ctx, palette_mode);
 
         let mut db = SqliteKnowledgeStore::open(&db_path)
             .or_else(|_| SqliteKnowledgeStore::open_in_memory())
@@ -760,6 +779,31 @@ impl CausalAtlasApp {
 
 impl eframe::App for CausalAtlasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.render_ui_frame(ctx);
+    }
+}
+
+impl CausalAtlasApp {
+    pub fn configure_huvec_tnf_screenshot_state(&mut self, ctx: &egui::Context) {
+        self.configure_screenshot_view(ctx, 1);
+    }
+
+    pub fn configure_screenshot_view(&mut self, ctx: &egui::Context, view: u8) {
+        self.apply_action(ctx, GuiAction::SelectCohort(0));
+        self.apply_action(ctx, GuiAction::RecomputeActive);
+        self.apply_action(ctx, GuiAction::RecomputeAllComparison);
+        self.apply_action(
+            ctx,
+            GuiAction::SetComparisonMetric(ComparisonMetric::UpstreamRegulatorsZ),
+        );
+        self.active_tab = match view {
+            2 => WorkbenchTab::CanonicalPathwaysMap,
+            3 => WorkbenchTab::UpstreamRegulators,
+            _ => WorkbenchTab::ComparisonAndPerturb,
+        };
+    }
+
+    pub fn render_ui_frame(&mut self, ctx: &egui::Context) {
         self.poll_worker();
         if self.worker_busy {
             ctx.request_repaint();
@@ -784,29 +828,28 @@ impl eframe::App for CausalAtlasApp {
                         self.active_tab = tab;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme_lbl = match self.palette_mode {
-                        WorkbenchPaletteMode::AcademicDark => "Light Theme",
-                        WorkbenchPaletteMode::PublicationLight => "Dark Theme",
-                    };
-                    if ui.button(theme_lbl).clicked() {
-                        actions.push(GuiAction::TogglePalette);
-                    }
-                    if ui.button("Export Report JSON").clicked() {
-                        actions.push(GuiAction::ExportJsonReportDialog);
-                    }
-                    if ui
-                        .add_enabled(!self.worker_busy, egui::Button::new("Sync & Update DB"))
-                        .clicked()
-                    {
-                        actions.push(GuiAction::OpenStreamsTab);
-                        actions.push(GuiAction::StartBatchDownload {
-                            pathways: true,
-                            regulatory: true,
-                            force: false,
-                        });
-                    }
-                });
+                ui.separator();
+                let theme_lbl = match self.palette_mode {
+                    WorkbenchPaletteMode::AcademicDark => "Light Theme",
+                    WorkbenchPaletteMode::PublicationLight => "Dark Theme",
+                };
+                if ui
+                    .add_enabled(!self.worker_busy, egui::Button::new("Sync & Update DB"))
+                    .clicked()
+                {
+                    actions.push(GuiAction::OpenStreamsTab);
+                    actions.push(GuiAction::StartBatchDownload {
+                        pathways: true,
+                        regulatory: true,
+                        force: false,
+                    });
+                }
+                if ui.button("Export Report JSON").clicked() {
+                    actions.push(GuiAction::ExportJsonReportDialog);
+                }
+                if ui.button(theme_lbl).clicked() {
+                    actions.push(GuiAction::TogglePalette);
+                }
             });
             ui.add_space(3.0);
         });
@@ -1260,13 +1303,13 @@ impl CausalAtlasApp {
 
                     let zoom = *pathway_zoom;
                     let pan = *pathway_pan;
-                    let vw = rect.width().max(760.0);
-                    let vh = rect.height().max(540.0);
+                    let vw = rect.width().max(320.0);
+                    let vh = rect.height().max(320.0);
                     let center = rect.center();
 
                     let to_screen = |nx: f32, ny: f32| -> Pos2 {
-                        let wx = (nx - 0.5) * (vw - 88.0);
-                        let wy = (ny - 0.5) * (vh - 52.0);
+                        let wx = (nx - 0.5) * (vw - 96.0).max(200.0);
+                        let wy = (ny - 0.5) * (vh - 56.0).max(200.0);
                         Pos2::new(center.x + wx * zoom + pan.x, center.y + wy * zoom + pan.y)
                     };
 
@@ -1280,14 +1323,14 @@ impl CausalAtlasApp {
                     painter.line_segment([nm_l, nm_r], Stroke::new(6.0 * zoom, pal.border_default));
 
                     painter.text(
-                        Pos2::new(pm_l.x + 4.0, pm_l.y - 12.0 * zoom),
-                        Align2::LEFT_BOTTOM,
+                        Pos2::new(rect.left() + 12.0, rect.top() + 8.0),
+                        Align2::LEFT_TOP,
                         SubcellularLocation::Extracellular.label(),
                         FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
                         pal.text_muted,
                     );
                     painter.text(
-                        Pos2::new(pm_l.x + 4.0, pm_l.y + 12.0 * zoom),
+                        Pos2::new(pm_l.x + 4.0, pm_l.y + 22.0 * zoom),
                         Align2::LEFT_TOP,
                         SubcellularLocation::Cytoplasm.label(),
                         FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
@@ -1295,7 +1338,7 @@ impl CausalAtlasApp {
                     );
                     if !pw_def.cell_context_label.is_empty() {
                         painter.text(
-                            Pos2::new(pm_r.x - 4.0, pm_r.y + 12.0 * zoom),
+                            Pos2::new(rect.right() - 12.0, rect.top() + 8.0),
                             Align2::RIGHT_TOP,
                             &pw_def.cell_context_label,
                             FontId::proportional(11.0 * zoom.clamp(0.8, 1.3)),
@@ -1393,7 +1436,7 @@ impl CausalAtlasApp {
                             draw_entity_glyph(
                                 &painter,
                                 pos,
-                                Vec2::new(26.0 * zoom, 14.5 * zoom),
+                                Vec2::new(29.0 * zoom, 15.0 * zoom),
                                 kind,
                                 fill,
                                 border,
@@ -1401,7 +1444,7 @@ impl CausalAtlasApp {
                             if pw_def.phospho_nodes.contains(nid) {
                                 draw_phospho_badge(
                                     &painter,
-                                    Pos2::new(pos.x + 21.0 * zoom, pos.y - 13.0 * zoom),
+                                    Pos2::new(pos.x + 23.0 * zoom, pos.y - 13.0 * zoom),
                                     pal.bg_canvas,
                                     pal.border_default,
                                 );
@@ -1413,7 +1456,7 @@ impl CausalAtlasApp {
                                 ),
                                 Align2::CENTER_CENTER,
                                 nid,
-                                FontId::proportional(10.5 * zoom.clamp(0.85, 1.35)),
+                                FontId::proportional(10.0 * zoom.clamp(0.85, 1.35)),
                                 pal.text_primary,
                             );
 
@@ -1474,7 +1517,7 @@ MAP Activity: {:+.2}",
                                 continue;
                             }
                             let is_sel = sel_pw_idx == idx;
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 if ui
                                     .selectable_label(
                                         is_sel,
@@ -1489,7 +1532,7 @@ MAP Activity: {:+.2}",
                                 }
                             });
                             let bar_w = ((hit.neg_log10_fdr / max_bar).clamp(0.04, 1.0) as f32)
-                                * (ui.available_width() - 90.0).max(60.0);
+                                * (ui.available_width() - 168.0).max(60.0);
                             ui.horizontal(|ui| {
                                 let (r, p) =
                                     ui.allocate_painter(Vec2::new(bar_w, 12.0), Sense::click());
@@ -2233,8 +2276,8 @@ MAP Activity: {:+.2}",
         actions: &mut Vec<GuiAction>,
     ) {
         ui.columns(2, |cols| {
-            cols[0].horizontal(|ui| {
-                ui.heading("Multi-Cohort Comparison Heatmap");
+            cols[0].heading("Multi-Cohort Comparison Heatmap");
+            cols[0].horizontal_wrapped(|ui| {
                 for m in [
                     ComparisonMetric::UpstreamRegulatorsZ,
                     ComparisonMetric::CanonicalPathwaysZ,
@@ -2293,11 +2336,12 @@ MAP Activity: {:+.2}",
             );
 
             cols[1].push_id("perturb_scroll", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
                     egui::Grid::new("perturb_grid")
                         .striped(true)
                         .num_columns(5)
-                        .spacing([10.0, 6.0])
+                        .spacing([8.0, 6.0])
+                        .max_col_width(150.0)
                         .show(ui, |ui| {
                             ui.strong("Perturbagen");
                             ui.strong("Class");
@@ -2307,12 +2351,14 @@ MAP Activity: {:+.2}",
                             ui.end_row();
 
                             for p in &rep.perturbation_matches {
-                                ui.label(&p.perturbagen);
-                                ui.label(p.kind.label());
+                                ui.add(egui::Label::new(&p.perturbagen).wrap());
+                                ui.add(egui::Label::new(p.kind.label()).wrap());
                                 let c = pal.color_for_z(p.connectivity_score / 25.0);
                                 ui.colored_label(c, format!("{:+.1}", p.connectivity_score));
-                                ui.colored_label(c, &p.mode);
-                                ui.label(&p.mechanism_of_action);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&p.mode).color(c)).wrap(),
+                                );
+                                ui.add(egui::Label::new(&p.mechanism_of_action).wrap());
                                 ui.end_row();
                             }
                         });

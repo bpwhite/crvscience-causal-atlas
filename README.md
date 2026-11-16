@@ -1,5 +1,7 @@
 # Causal Atlas (`causal-atlas` v0.2.0)
 
+![Causal-Atlas Headless Workbench](validation/headless_screenshot.png)
+
 **Causal Atlas** is an independent, clean-room native Rust desktop GUI, terminal UI, and CLI workbench for causal biological pathway, upstream regulator, mechanistic network, and perturbation signature inference backed by a bundled **SQLite 3 WAL caching engine** and open-source biomedical data streams.
 
 ## Clean-Room & Bundled Architecture
