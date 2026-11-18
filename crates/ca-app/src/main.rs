@@ -13,9 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://gnu.org>.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![deny(unsafe_code)]
 
 mod gui;
+mod icon;
 mod svg_export;
 mod theme;
 mod tui;
@@ -169,25 +171,19 @@ fn write_rgba_png(
     let row_bytes = width as usize * 4;
     let mut raw = Vec::with_capacity(height as usize * (1 + row_bytes));
     for row in rgba.chunks_exact(row_bytes) {
-        raw.push(0);
-        raw.extend_from_slice(row);
+        raw.push(1); // PNG Sub filter
+        for (i, &b) in row.iter().enumerate() {
+            let left = if i >= 4 { row[i - 4] } else { 0 };
+            raw.push(b.wrapping_sub(left));
+        }
     }
-    let (mut s1, mut s2) = (1u32, 0u32);
-    for &b in &raw {
-        s1 = (s1 + b as u32) % 65521;
-        s2 = (s2 + s1) % 65521;
-    }
-    let mut zlib = Vec::with_capacity(raw.len() + 32);
-    zlib.extend_from_slice(&[0x78, 0x01]);
-    let chunks: Vec<&[u8]> = if raw.is_empty() { vec![&[]] } else { raw.chunks(65535).collect() };
-    for (i, chunk) in chunks.iter().enumerate() {
-        zlib.push(if i + 1 == chunks.len() { 1 } else { 0 });
-        let len = chunk.len() as u16;
-        zlib.extend_from_slice(&len.to_le_bytes());
-        zlib.extend_from_slice(&(!len).to_le_bytes());
-        zlib.extend_from_slice(chunk);
-    }
-    zlib.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+    let zlib = {
+        use std::io::Write;
+        let mut enc =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&raw)?;
+        enc.finish()?
+    };
     let mut ihdr = Vec::with_capacity(13);
     ihdr.extend_from_slice(&width.to_be_bytes());
     ihdr.extend_from_slice(&height.to_be_bytes());
@@ -385,7 +381,26 @@ fn capture_headless_screenshot(
     Ok(())
 }
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn attach_parent_console_if_cli() {
+    if std::env::args_os().len() > 1 {
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        extern "system" {
+            fn AttachConsole(dw_process_id: u32) -> i32;
+        }
+        // SAFETY: Attaches stdout/stderr to an existing parent console only when CLI
+        // arguments are supplied; failure when no parent console exists is harmless.
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    attach_parent_console_if_cli();
+
     let cli = Cli::parse();
     let db_path = cli.db;
 
@@ -398,6 +413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let native_options = eframe::NativeOptions {
                 viewport: egui::ViewportBuilder::default()
                     .with_title("Causal Atlas — Open-Source Pathway & Causal Network Workbench (SQLite WAL)")
+                    .with_icon(std::sync::Arc::new(icon::app_icon_data()))
                     .with_inner_size([1500.0, 920.0])
                     .with_min_inner_size([1024.0, 680.0]),
                 ..Default::default()
@@ -568,4 +584,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_rgba_png_uses_deflate_compression_under_1mb() {
+        let w = 1600u32;
+        let h = 1000u32;
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                rgba[idx] = ((x / 32) as u8).wrapping_mul(17);
+                rgba[idx + 1] = ((y / 25) as u8).wrapping_mul(19);
+                rgba[idx + 2] = 48;
+                rgba[idx + 3] = 255;
+            }
+        }
+        let out_path = std::env::temp_dir().join(format!(
+            "causal_atlas_deflate_test_{}.png",
+            std::process::id()
+        ));
+        write_rgba_png(&out_path, w, h, &rgba).expect("write PNG");
+        let bytes = std::fs::read(&out_path).expect("read PNG");
+        let _ = std::fs::remove_file(&out_path);
+
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(bytes.windows(4).any(|w| w == b"IDAT"));
+        assert!(bytes.windows(4).any(|w| w == b"IEND"));
+        assert!(
+            bytes.len() < 1_048_576,
+            "DEFLATE PNG should be < 1.0 MB, got {} bytes",
+            bytes.len()
+        );
+    }
 }

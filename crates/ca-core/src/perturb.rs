@@ -36,6 +36,8 @@ pub struct PerturbationHit {
     pub mode: String,
     pub matched_up: Vec<String>,
     pub matched_down: Vec<String>,
+    #[serde(default)]
+    pub target_clamps: Vec<(String, i8)>,
 }
 
 /// Evaluates directional connectivity between the query expression profile and open-source
@@ -112,6 +114,7 @@ pub fn run_perturbation_match(
             mode,
             matched_up,
             matched_down,
+            target_clamps: sig.target_clamps.clone(),
         });
     }
 
@@ -252,5 +255,75 @@ pub fn run_comparison_analysis(
         entity_labels,
         values,
         significance,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::builtin_cohorts;
+    use crate::seed_kb::build_seed_knowledge_graph;
+    use crate::CoreAnalysisConfig;
+
+    #[test]
+    fn seed_kb_has_expanded_valid_signatures_and_scores_reversers_and_mimickers() {
+        let kg = build_seed_knowledge_graph();
+        assert!(
+            kg.signatures.len() >= 25,
+            "Expected >= 25 seed signatures, got {}",
+            kg.signatures.len()
+        );
+
+        let mut seen_ids = BTreeSet::new();
+        let mut seen_kinds = BTreeSet::new();
+        for sig in &kg.signatures {
+            assert!(
+                seen_ids.insert(sig.id.clone()),
+                "Duplicate signature ID: {}",
+                sig.id
+            );
+            seen_kinds.insert(format!("{:?}", sig.kind));
+            for g in sig
+                .up_genes
+                .iter()
+                .chain(sig.down_genes.iter())
+                .chain(sig.target_clamps.iter().map(|(g, _)| g))
+            {
+                assert!(
+                    kg.nodes.contains_key(g),
+                    "Signature {} references unknown KB symbol {g}",
+                    sig.id
+                );
+            }
+        }
+        assert_eq!(
+            seen_kinds.len(),
+            4,
+            "All 4 PerturbationKind variants should be represented"
+        );
+
+        let cfg = CoreAnalysisConfig::default();
+        for ds in builtin_cohorts() {
+            let active = ds.filter_active(cfg.abs_log2fc_cutoff, cfg.fdr_cutoff, &kg);
+            let hits = run_perturbation_match(&active, &kg);
+            let reverser = hits.iter().find(|h| h.connectivity_score <= -25.0);
+            let mimicker = hits.iter().find(|h| h.connectivity_score >= 25.0);
+            assert!(
+                reverser.is_some(),
+                "Cohort {} should have at least one strong Reverser",
+                ds.name
+            );
+            assert!(
+                mimicker.is_some(),
+                "Cohort {} should have at least one strong Mimicker",
+                ds.name
+            );
+            let rev = reverser.unwrap();
+            assert!(
+                !rev.matched_up.is_empty() || !rev.matched_down.is_empty(),
+                "Reverser {} should expose matched genes",
+                rev.perturbagen
+            );
+        }
     }
 }

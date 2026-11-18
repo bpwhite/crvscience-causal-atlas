@@ -214,7 +214,8 @@ impl SqliteKnowledgeStore {
         Ok(())
     }
 
-    /// Seeds the SQLite database with the starter open-source knowledge graph if currently empty.
+    /// Seeds the SQLite database with the starter open-source knowledge graph if currently empty,
+    /// and backfills expanded seed perturbation signatures into pre-existing databases.
     pub fn ensure_seeded(&mut self, seed_fn: fn() -> KnowledgeGraph) -> Result<bool, StreamError> {
         let count: i64 = self
             .conn
@@ -225,6 +226,48 @@ impl SqliteKnowledgeStore {
             self.upsert_knowledge_graph(&seed_kg)?;
             return Ok(true);
         }
+
+        let sig_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM perturbation_signatures", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| StreamError::Database(e.to_string()))?;
+        if sig_count < 25 {
+            let seed_kg = seed_fn();
+            let now = unix_now() as i64;
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| StreamError::Database(e.to_string()))?;
+            {
+                let mut stmt_sig = tx
+                    .prepare_cached(
+                        "INSERT INTO perturbation_signatures (id, signature_json)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(id) DO UPDATE SET signature_json = excluded.signature_json",
+                    )
+                    .map_err(|e| StreamError::Database(e.to_string()))?;
+                for sig in &seed_kg.signatures {
+                    let sj = serde_json::to_string(sig)?;
+                    stmt_sig
+                        .execute(params![sig.id, sj])
+                        .map_err(|e| StreamError::Database(e.to_string()))?;
+                }
+                let rev_hash = hex_sha256(
+                    format!("sig-backfill:{now}:{}", seed_kg.signatures.len()).as_bytes(),
+                );
+                tx.execute(
+                    "INSERT INTO kv_meta (key, value) VALUES ('kg_revision', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![rev_hash],
+                )
+                .map_err(|e| StreamError::Database(e.to_string()))?;
+            }
+            tx.commit().map_err(|e| StreamError::Database(e.to_string()))?;
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
@@ -736,5 +779,33 @@ mod tests {
             .unwrap()
             .expect("Expected SQLite cache hit");
         assert_eq!(cached.canonical_pathways.len(), rep.canonical_pathways.len());
+    }
+
+    #[test]
+    fn sqlite_backfill_restores_expanded_seed_signatures() {
+        let mut store = SqliteKnowledgeStore::open_in_memory().unwrap();
+        assert!(store.ensure_seeded(build_seed_knowledge_graph).unwrap());
+        let rev_before = store.kg_revision();
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM perturbation_signatures WHERE id NOT IN (
+                    SELECT id FROM perturbation_signatures ORDER BY id LIMIT 7
+                 )",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.stats().unwrap().cached_signatures, 7);
+
+        let backfilled = store.ensure_seeded(build_seed_knowledge_graph).unwrap();
+        assert!(backfilled, "Expected ensure_seeded to backfill signatures");
+        let kg = store.load_knowledge_graph().unwrap();
+        assert!(
+            kg.signatures.len() >= 25,
+            "Expected >= 25 signatures after backfill, got {}",
+            kg.signatures.len()
+        );
+        assert_ne!(store.kg_revision(), rev_before);
     }
 }

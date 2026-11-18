@@ -29,11 +29,27 @@ pub enum PredictedState {
     Neutral,
 }
 
+/// Rounds an activation Z-score to 2 decimal places matching `{:+.2}` display formatting.
+pub fn round_z_2dp(z: f64) -> f64 {
+    if !z.is_finite() {
+        return 0.0;
+    }
+    let rounded = format!("{z:.2}").parse::<f64>().unwrap_or(0.0);
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
+/// Formats an activation Z-score to 2 decimal places with explicit sign, normalizing `-0.00` to `+0.00`.
+pub fn format_z_2dp(z: f64) -> String {
+    let z_disp = round_z_2dp(z);
+    format!("{z_disp:+.2}")
+}
+
 impl PredictedState {
     pub fn from_z(z: f64) -> Self {
-        if z >= 2.0 {
+        let z_disp = round_z_2dp(z);
+        if z_disp >= 2.0 {
             Self::Activated
-        } else if z <= -2.0 {
+        } else if z_disp <= -2.0 {
             Self::Inhibited
         } else {
             Self::Neutral
@@ -368,5 +384,201 @@ pub fn build_mechanistic_network(
         regulator_z_scores,
         edges: mech_edges,
         connected_dataset_genes: connected_genes_set.into_iter().collect(),
+    }
+}
+
+/// Selects up to `max_total` target evidences for Mechanistic Network visualization using
+/// polarity-stratified quotas so repressed/inhibited targets are preserved alongside activated
+/// targets instead of being truncated by pure `|log2FC|` ordering.
+pub fn select_stratified_mechanistic_targets<'a>(
+    targets: &'a [TargetEvidence],
+    max_total: usize,
+) -> Vec<&'a TargetEvidence> {
+    if max_total == 0 || targets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ordered: Vec<&'a TargetEvidence> = targets.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.observed_log2fc
+            .abs()
+            .total_cmp(&a.observed_log2fc.abs())
+            .then_with(|| a.target_gene.cmp(&b.target_gene))
+    });
+
+    let mut activated: Vec<&'a TargetEvidence> = Vec::new();
+    let mut repressed: Vec<&'a TargetEvidence> = Vec::new();
+    for t in &ordered {
+        let is_repressed = t.edge_sign == EdgeSign::Inhibiting
+            || (t.edge_sign == EdgeSign::Ambiguous && t.observed_log2fc < 0.0);
+        if is_repressed {
+            repressed.push(*t);
+        } else {
+            activated.push(*t);
+        }
+    }
+
+    // Fallback: if edge signs are one-sided while dataset log2FC signs span both directions,
+    // stratify by observed expression sign so repressed targets remain visible.
+    if (activated.is_empty() || repressed.is_empty())
+        && ordered.iter().any(|t| t.observed_log2fc < 0.0)
+        && ordered.iter().any(|t| t.observed_log2fc >= 0.0)
+    {
+        activated.clear();
+        repressed.clear();
+        for t in &ordered {
+            if t.observed_log2fc < 0.0 {
+                repressed.push(*t);
+            } else {
+                activated.push(*t);
+            }
+        }
+    }
+
+    let half = max_total / 2;
+    let rem = max_total - half;
+    let mut take_act = activated.len().min(rem);
+    let mut take_rep = repressed.len().min(half);
+    let leftover = max_total - (take_act + take_rep);
+    if leftover > 0 {
+        let extra_act = (activated.len() - take_act).min(leftover);
+        take_act += extra_act;
+        let rem_after = leftover - extra_act;
+        if rem_after > 0 {
+            take_rep += (repressed.len() - take_rep).min(rem_after);
+        }
+    }
+
+    let mut out = Vec::with_capacity(take_act + take_rep);
+    out.extend_from_slice(&activated[..take_act]);
+    out.extend_from_slice(&repressed[..take_rep]);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::builtin_cohorts;
+    use crate::seed_kb::build_seed_knowledge_graph;
+
+    #[test]
+    fn predicted_state_matches_two_decimal_display_never_contradicts() {
+        let cases = [
+            (-1.999637, PredictedState::Inhibited),
+            (1.998199, PredictedState::Activated),
+            (-1.995, PredictedState::Inhibited),
+            (1.995, PredictedState::Activated),
+            (-1.994, PredictedState::Neutral),
+            (1.994, PredictedState::Neutral),
+            (-2.0, PredictedState::Inhibited),
+            (2.0, PredictedState::Activated),
+            (f64::NAN, PredictedState::Neutral),
+            (f64::INFINITY, PredictedState::Neutral),
+        ];
+        for (z, expected) in cases {
+            let state = PredictedState::from_z(z);
+            assert_eq!(state, expected, "z={z}");
+            if z.is_finite() {
+                let disp = format_z_2dp(z);
+                assert_ne!(disp, "-0.00", "z={z} formatted as negative zero");
+                if disp == "+2.00" {
+                    assert_eq!(state, PredictedState::Activated);
+                } else if disp == "-2.00" {
+                    assert_eq!(state, PredictedState::Inhibited);
+                } else {
+                    assert_eq!(state, PredictedState::Neutral);
+                }
+            }
+        }
+
+        // Negative-zero normalization checks
+        for z in [-0.004, -0.0049, -0.0, 0.0, 0.004] {
+            let r = round_z_2dp(z);
+            assert_eq!(r, 0.0);
+            assert!(!r.is_sign_negative(), "round_z_2dp({z}) returned -0.0");
+            assert_eq!(format_z_2dp(z), "+0.00");
+        }
+    }
+
+    #[test]
+    fn stratified_mechanistic_targets_preserves_repressed_targets_on_tnf_cohort() {
+        let kg = build_seed_knowledge_graph();
+        let cohorts = builtin_cohorts();
+        let cfg = CoreAnalysisConfig::default();
+        let active = cohorts[0].filter_active(cfg.abs_log2fc_cutoff, cfg.fdr_cutoff, &kg);
+        let hits = run_upstream_regulators(&active, &kg, &cfg);
+        let tnf = hits
+            .iter()
+            .find(|h| h.regulator_id == "TNF")
+            .expect("TNF hit present");
+
+        let selected = select_stratified_mechanistic_targets(&tnf.target_evidences, 14);
+        assert_eq!(selected.len(), 14);
+        let rep_syms: BTreeSet<&str> = selected
+            .iter()
+            .filter(|t| t.edge_sign == EdgeSign::Inhibiting)
+            .map(|t| t.target_gene.as_str())
+            .collect();
+        for expected in ["KLF2", "NOS3", "THBD", "PPARG"] {
+            assert!(
+                rep_syms.contains(expected),
+                "repressed target {expected} must not be dropped"
+            );
+        }
+        let act_count = selected
+            .iter()
+            .filter(|t| t.edge_sign == EdgeSign::Activating)
+            .count();
+        assert_eq!(act_count, 10);
+    }
+
+    #[test]
+    fn stratified_mechanistic_targets_splits_balanced_and_one_sided_regulons() {
+        let mut balanced = Vec::new();
+        for i in 0..12 {
+            balanced.push(TargetEvidence {
+                target_gene: format!("ACT{i:02}"),
+                edge_sign: EdgeSign::Activating,
+                observed_log2fc: 3.0 - (i as f64) * 0.1,
+                consistent: true,
+                source_db: "Test".to_string(),
+            });
+            balanced.push(TargetEvidence {
+                target_gene: format!("REP{i:02}"),
+                edge_sign: EdgeSign::Inhibiting,
+                observed_log2fc: -3.0 + (i as f64) * 0.1,
+                consistent: true,
+                source_db: "Test".to_string(),
+            });
+        }
+        let picked = select_stratified_mechanistic_targets(&balanced, 14);
+        assert_eq!(picked.len(), 14);
+        assert_eq!(
+            picked
+                .iter()
+                .filter(|t| t.edge_sign == EdgeSign::Activating)
+                .count(),
+            7
+        );
+        assert_eq!(
+            picked
+                .iter()
+                .filter(|t| t.edge_sign == EdgeSign::Inhibiting)
+                .count(),
+            7
+        );
+
+        let one_sided: Vec<TargetEvidence> = (0..16)
+            .map(|i| TargetEvidence {
+                target_gene: format!("INH{i:02}"),
+                edge_sign: EdgeSign::Inhibiting,
+                observed_log2fc: -4.0 + (i as f64) * 0.1,
+                consistent: true,
+                source_db: "Test".to_string(),
+            })
+            .collect();
+        let picked_one = select_stratified_mechanistic_targets(&one_sided, 14);
+        assert_eq!(picked_one.len(), 14);
+        assert!(select_stratified_mechanistic_targets(&one_sided, 0).is_empty());
     }
 }

@@ -169,11 +169,16 @@ pub fn kramer_activation_z(
     let mut num = 0.0f64;
     let mut sum_w2 = 0.0f64;
     let mut num_corr = 0.0f64;
-    let mu = (regulator_mean_sign * dataset_mean_sign).clamp(-0.99, 0.99);
+    let raw_mu = if regulator_mean_sign.is_finite() && dataset_mean_sign.is_finite() {
+        regulator_mean_sign * dataset_mean_sign
+    } else {
+        0.0
+    };
+    let mu = raw_mu.clamp(-0.99, 0.99);
     let skew_flagged = mu.abs() > 0.25;
 
     for &(w, s_edge, s_data) in observations {
-        if s_edge == 0 || s_data == 0 || w <= 0.0 {
+        if s_edge == 0 || s_data == 0 || !w.is_finite() || w <= 0.0 {
             continue;
         }
         let x_i = f64::from(s_edge) * f64::from(s_data);
@@ -252,5 +257,26 @@ mod tests {
         let obs_inh = vec![(1.0, 1, -1), (1.0, -1, 1), (1.0, 1, -1), (1.0, 1, -1)];
         let (z_inh, _, _) = kramer_activation_z(&obs_inh, 0.0, 0.0);
         assert!((z_inh + 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn kramer_z_skips_non_finite_weights_and_mean_signs() {
+        let obs = vec![
+            (f64::NAN, 1, 1),
+            (f64::INFINITY, 1, 1),
+            (f64::NEG_INFINITY, 1, 1),
+            (1.0, 1, 1),
+            (1.0, -1, -1),
+            (1.0, 1, 1),
+            (1.0, 1, 1),
+        ];
+        let (z, z_corr, _) = kramer_activation_z(&obs, 0.0, 0.0);
+        assert!(z.is_finite() && (z - 2.0).abs() < 1e-9, "got z={z}");
+        assert!(z_corr.is_finite());
+
+        let (z_only_bad, z_corr_bad, _) =
+            kramer_activation_z(&[(f64::NAN, 1, 1), (f64::INFINITY, 1, -1)], f64::NAN, 0.0);
+        assert_eq!(z_only_bad, 0.0);
+        assert_eq!(z_corr_bad, 0.0);
     }
 }

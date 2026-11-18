@@ -508,6 +508,7 @@ dependencies = [
  "crossterm",
  "eframe",
  "egui",
+ "flate2",
  "ratatui",
  "rfd",
  "serde",

@@ -96,7 +96,7 @@ pub fn run_headless_tui(report: &CoreAnalysisReport) -> io::Result<()> {
                     let rows = report.canonical_pathways.iter().take(25).map(|p| {
                         let z_str = p
                             .activation_z
-                            .map(|z| format!("{z:+.2}"))
+                            .map(ca_core::format_z_2dp)
                             .unwrap_or_else(|| "n/a".to_string());
                         Row::new(vec![
                             Cell::from(p.pathway_id.as_str()),
@@ -131,8 +131,8 @@ pub fn run_headless_tui(report: &CoreAnalysisReport) -> io::Result<()> {
                             Cell::from(r.regulator_id.as_str()),
                             Cell::from(r.kind.label()),
                             Cell::from(r.predicted_state.label()),
-                            Cell::from(format!("{:+.2}", r.activation_z)),
-                            Cell::from(format!("{:+.2}", r.bias_corrected_z)),
+                            Cell::from(ca_core::format_z_2dp(r.activation_z)),
+                            Cell::from(ca_core::format_z_2dp(r.bias_corrected_z)),
                             Cell::from(format!("{:.2e}", r.p_value)),
                             Cell::from(format!("{}", r.overlap_count)),
                         ])
@@ -174,7 +174,7 @@ pub fn run_headless_tui(report: &CoreAnalysisReport) -> io::Result<()> {
                             Cell::from(c.root_regulator.as_str()),
                             Cell::from(format!("K={}", c.max_depth_k)),
                             Cell::from(c.predicted_state.label()),
-                            Cell::from(format!("{:+.2}", c.activation_z)),
+                            Cell::from(ca_core::format_z_2dp(c.activation_z)),
                             Cell::from(format!("{:.3e}", c.network_bias_p_value)),
                             Cell::from(c.intermediate_regulators.join(", ")),
                         ])

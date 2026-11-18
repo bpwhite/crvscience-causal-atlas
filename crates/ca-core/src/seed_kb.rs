@@ -719,138 +719,361 @@ pub fn build_seed_knowledge_graph() -> KnowledgeGraph {
     ];
 
     // 5. Open-Source Perturbation Connectivity Signatures (SigCom LINCS / L1000 consensus profiles)
+    let make_sig = |id: &str,
+                    perturbagen: &str,
+                    kind: PerturbationKind,
+                    cell_context: &str,
+                    mechanism_of_action: &str,
+                    source_db: &str,
+                    up: &[&str],
+                    down: &[&str],
+                    clamps: &[(&str, i8)]| PerturbationSignature {
+        id: id.to_string(),
+        perturbagen: perturbagen.to_string(),
+        kind,
+        cell_context: cell_context.to_string(),
+        mechanism_of_action: mechanism_of_action.to_string(),
+        source_db: source_db.to_string(),
+        source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
+        up_genes: up.iter().map(|s| (*s).to_string()).collect(),
+        down_genes: down.iter().map(|s| (*s).to_string()).collect(),
+        target_clamps: clamps
+            .iter()
+            .map(|(g, s)| ((*g).to_string(), *s))
+            .collect(),
+    };
+
     kg.signatures = vec![
-        PerturbationSignature {
-            id: "LINCS-CP-DEX-001".to_string(),
-            perturbagen: "Dexamethasone".to_string(),
-            kind: PerturbationKind::SmallMoleculeCompound,
-            cell_context: "A549 / Endothelial Consensus (10 uM, 24h)".to_string(),
-            mechanism_of_action: "Glucocorticoid receptor (NR3C1) agonist; NF-kB transrepressor".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec!["NFKBIA", "KLF2", "THBD", "CDKN1A"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            down_genes: vec![
-                "ICAM1", "VCAM1", "SELE", "CCL2", "CXCL8", "IL6", "IL1B", "PTGS2", "MMP9", "CSF2",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-CP-IKK16-002".to_string(),
-            perturbagen: "BMS-345541 (Selective IKK-beta Inhibitor)".to_string(),
-            kind: PerturbationKind::SmallMoleculeCompound,
-            cell_context: "HUVEC / HeLa Consensus (5 uM, 6h)".to_string(),
-            mechanism_of_action: "Allosteric IKBKB inhibitor blocking NF-kB nuclear translocation".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec!["NOS3", "KLF2", "PPARG"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            down_genes: vec![
-                "ICAM1", "VCAM1", "SELE", "CXCL8", "CCL2", "CXCL10", "IL6", "BIRC3", "TNFAIP3",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-LIG-TNF-003".to_string(),
-            perturbagen: "Recombinant Human TNF-alpha".to_string(),
-            kind: PerturbationKind::LigandStimulus,
-            cell_context: "HUVEC / A375 Consensus (10 ng/mL, 6h)".to_string(),
-            mechanism_of_action: "TNFRSF1A agonist activating canonical IKK/NF-kB & JNK".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec![
-                "ICAM1", "VCAM1", "SELE", "CCL2", "CXCL8", "IL6", "NFKBIA", "TNFAIP3", "BIRC3", "SOD2",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            down_genes: vec!["NOS3", "KLF2", "THBD"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-CP-FULV-004".to_string(),
-            perturbagen: "Fulvestrant (ICI 182,780)".to_string(),
-            kind: PerturbationKind::SmallMoleculeCompound,
-            cell_context: "MCF-7 Luminal Breast Carcinoma (1 uM, 24h)".to_string(),
-            mechanism_of_action: "Selective Estrogen Receptor Downregulator (SERD)".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec!["CDKN1A", "CDKN1B", "FOXO3", "BAX", "ERBB2"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            down_genes: vec![
-                "TFF1", "GREB1", "PGR", "CXCL12", "MYC", "CCND1", "AREG", "BCL2", "CTSD", "E2F1", "MKI67",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-CP-TAM-005".to_string(),
-            perturbagen: "Tamoxifen / All-Trans Retinoic Acid".to_string(),
-            kind: PerturbationKind::SmallMoleculeCompound,
-            cell_context: "MCF-7 Consensus (10 uM, 24h)".to_string(),
-            mechanism_of_action: "SERM / RAR agonist opposing ER-alpha proliferative transcription".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec!["CDKN1A", "CDKN1B", "FOXO3"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            down_genes: vec!["TFF1", "GREB1", "MYC", "CCND1", "PGR", "PCNA"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-KO-SOST-006".to_string(),
-            perturbagen: "Romosozumab-Mimetic / SOST CRISPR Knockout".to_string(),
-            kind: PerturbationKind::CrisprKnockout,
-            cell_context: "Osteoprogenitor / Mesenchymal Consensus".to_string(),
-            mechanism_of_action: "Loss of sclerostin derepresses LRP5/6-Wnt and BMP/SMAD osteogenesis".to_string(),
-            source_db: "SigCom LINCS CRISPR".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec![
-                "RUNX2", "SP7", "ALPL", "BGLAP", "COL1A1", "AXIN2", "LEF1", "BMP2", "CCND1",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            down_genes: vec!["PPARG", "CEBPA", "CDKN1A"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        },
-        PerturbationSignature {
-            id: "LINCS-CP-LGK974-007".to_string(),
-            perturbagen: "LGK-974 (Porcupine Wnt Secretion Inhibitor)".to_string(),
-            kind: PerturbationKind::SmallMoleculeCompound,
-            cell_context: "HT29 / Osteosarcoma Consensus (1 uM, 24h)".to_string(),
-            mechanism_of_action: "PORCN inhibitor blocking Wnt palmitoylation and beta-catenin targets".to_string(),
-            source_db: "SigCom LINCS L1000".to_string(),
-            source_url: "https://maayanlab.cloud/sigcom-lincs".to_string(),
-            up_genes: vec!["CDKN1A", "PPARG", "CEBPA"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            down_genes: vec![
-                "AXIN2", "LEF1", "RUNX2", "SP7", "ALPL", "BGLAP", "MYC", "CCND1", "MMP13",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        },
+        make_sig(
+            "LINCS-CP-DEX-001",
+            "Dexamethasone",
+            PerturbationKind::SmallMoleculeCompound,
+            "A549 / Endothelial Consensus (10 uM, 24h)",
+            "Glucocorticoid receptor (NR3C1) agonist; NF-kB transrepressor",
+            "SigCom LINCS L1000",
+            &["NFKBIA", "KLF2", "THBD", "CDKN1A"],
+            &["ICAM1", "VCAM1", "SELE", "CCL2", "CXCL8", "IL6", "IL1B", "PTGS2", "MMP9", "CSF2"],
+            &[("NR3C1", 1), ("IKBKB", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-IKK16-002",
+            "BMS-345541 (Selective IKK-beta Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "HUVEC / HeLa Consensus (5 uM, 6h)",
+            "Allosteric IKBKB inhibitor blocking NF-kB nuclear translocation",
+            "SigCom LINCS L1000",
+            &["NOS3", "KLF2", "PPARG"],
+            &["ICAM1", "VCAM1", "SELE", "CXCL8", "CCL2", "CXCL10", "IL6", "BIRC3", "TNFAIP3"],
+            &[("IKBKB", -1)],
+        ),
+        make_sig(
+            "LINCS-LIG-TNF-003",
+            "Recombinant Human TNF-alpha",
+            PerturbationKind::LigandStimulus,
+            "HUVEC / A375 Consensus (10 ng/mL, 6h)",
+            "TNFRSF1A agonist activating canonical IKK/NF-kB & JNK",
+            "SigCom LINCS L1000",
+            &["ICAM1", "VCAM1", "SELE", "CCL2", "CXCL8", "IL6", "NFKBIA", "TNFAIP3", "BIRC3", "SOD2"],
+            &["NOS3", "KLF2", "THBD"],
+            &[("TNF", 1), ("TNFRSF1A", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-FULV-004",
+            "Fulvestrant (ICI 182,780)",
+            PerturbationKind::SmallMoleculeCompound,
+            "MCF-7 Luminal Breast Carcinoma (1 uM, 24h)",
+            "Selective Estrogen Receptor Downregulator (SERD)",
+            "SigCom LINCS L1000",
+            &["CDKN1A", "CDKN1B", "FOXO3", "BAX", "ERBB2"],
+            &["TFF1", "GREB1", "PGR", "CXCL12", "MYC", "CCND1", "AREG", "BCL2", "CTSD", "E2F1", "MKI67"],
+            &[("ESR1", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-TAM-005",
+            "Tamoxifen / All-Trans Retinoic Acid",
+            PerturbationKind::SmallMoleculeCompound,
+            "MCF-7 Consensus (10 uM, 24h)",
+            "SERM / RAR agonist opposing ER-alpha proliferative transcription",
+            "SigCom LINCS L1000",
+            &["CDKN1A", "CDKN1B", "FOXO3"],
+            &["TFF1", "GREB1", "MYC", "CCND1", "PGR", "PCNA"],
+            &[("ESR1", -1)],
+        ),
+        make_sig(
+            "LINCS-KO-SOST-006",
+            "Romosozumab-Mimetic / SOST CRISPR Knockout",
+            PerturbationKind::CrisprKnockout,
+            "Osteoprogenitor / Mesenchymal Consensus",
+            "Loss of sclerostin derepresses LRP5/6-Wnt and BMP/SMAD osteogenesis",
+            "SigCom LINCS CRISPR",
+            &["RUNX2", "SP7", "ALPL", "BGLAP", "COL1A1", "AXIN2", "LEF1", "BMP2", "CCND1"],
+            &["PPARG", "CEBPA", "CDKN1A"],
+            &[("SOST", -1), ("LRP5", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-LGK974-007",
+            "LGK-974 (Porcupine Wnt Secretion Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "HT29 / Osteosarcoma Consensus (1 uM, 24h)",
+            "PORCN inhibitor blocking Wnt palmitoylation and beta-catenin targets",
+            "SigCom LINCS L1000",
+            &["CDKN1A", "PPARG", "CEBPA"],
+            &["AXIN2", "LEF1", "RUNX2", "SP7", "ALPL", "BGLAP", "MYC", "CCND1", "MMP13"],
+            &[("CTNNB1", -1), ("RUNX2", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-TPCA1-008",
+            "TPCA-1 (IKK-2 / NF-kB Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "HUVEC / Bronchial Epithelial Consensus (3 uM, 6h)",
+            "ATP-competitive IKBKB kinase inhibitor suppressing cytokine & adhesion genes",
+            "SigCom LINCS L1000",
+            &["KLF2", "NOS3", "THBD"],
+            &["VCAM1", "ICAM1", "SELE", "CXCL8", "CCL2", "IL6", "PTGS2", "MMP9"],
+            &[("IKBKB", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-CELX-009",
+            "Celecoxib (Selective COX-2 Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "HUVEC / Macrophage Consensus (10 uM, 24h)",
+            "PTGS2 inhibition dampening prostaglandin-amplified vascular inflammation",
+            "SigCom LINCS L1000",
+            &["THBD", "NOS3", "CDKN1A"],
+            &["PTGS2", "IL6", "CXCL8", "MMP9", "BCL2", "CCND1"],
+            &[("PTGS2", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-RUXO-010",
+            "Ruxolitinib (JAK1/JAK2 Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Endothelial / PBMC Consensus (1 uM, 6h)",
+            "ATP-competitive JAK1/2 inhibitor blocking STAT1/IRF1 chemokine induction",
+            "SigCom LINCS L1000",
+            &["KLF2", "NOS3"],
+            &["CXCL10", "IRF1", "STAT1", "ICAM1", "CCL2", "IL6", "STAT3"],
+            &[("JAK1", -1), ("STAT1", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-TOFA-011",
+            "Tofacitinib (Pan-JAK Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Synovial / Endothelial Consensus (1 uM, 24h)",
+            "JAK1/3 inhibitor attenuating IFN-gamma and IL-6 STAT signaling",
+            "SigCom LINCS L1000",
+            &["KLF2", "THBD", "PPARG"],
+            &["CXCL10", "CCL2", "ICAM1", "IRF1", "STAT1", "STAT3", "IL6"],
+            &[("JAK1", -1), ("STAT1", -1), ("STAT3", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-SIMV-012",
+            "Simvastatin (HMG-CoA Reductase Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "HUVEC Laminar-Mimetic Consensus (5 uM, 24h)",
+            "Induces endothelial KLF2/NOS3/THBD vasoprotection and represses VCAM1",
+            "SigCom LINCS L1000",
+            &["KLF2", "NOS3", "THBD", "PPARG"],
+            &["VCAM1", "ICAM1", "SELE", "CCL2", "MMP9", "PTGS2"],
+            &[("KLF2", 1), ("NOS3", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-ROSI-013",
+            "Rosiglitazone (PPAR-gamma Agonist)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Adipocyte / Endothelial Consensus (10 uM, 24h)",
+            "PPARG nuclear receptor agonist transrepressing NF-kB adhesion cascades",
+            "SigCom LINCS L1000",
+            &["PPARG", "CEBPA", "KLF2", "NOS3", "CDKN1A"],
+            &["VCAM1", "ICAM1", "CCL2", "IL6", "MMP9", "RUNX2"],
+            &[("PPARG", 1), ("NFKB1", -1)],
+        ),
+        make_sig(
+            "LINCS-LIG-IFNG-014",
+            "Recombinant Human IFN-gamma",
+            PerturbationKind::LigandStimulus,
+            "HUVEC / THP-1 Consensus (20 ng/mL, 6h)",
+            "IFNGR1/JAK1/STAT1 activation driving IRF1 and CXCL10 expression",
+            "SigCom LINCS L1000",
+            &["STAT1", "IRF1", "CXCL10", "ICAM1", "CCL2", "VCAM1"],
+            &["KLF2", "NOS3"],
+            &[("IFNG", 1), ("IFNGR1", 1), ("STAT1", 1)],
+        ),
+        make_sig(
+            "LINCS-LIG-IL1B-015",
+            "Recombinant Human IL-1beta",
+            PerturbationKind::LigandStimulus,
+            "HUVEC / Fibroblast Consensus (5 ng/mL, 6h)",
+            "MAP3K7/IKK/NF-kB activation inducing endothelial chemokines & COX-2",
+            "SigCom LINCS L1000",
+            &["SELE", "ICAM1", "VCAM1", "CXCL8", "IL6", "PTGS2", "MMP9", "CSF2"],
+            &["KLF2", "NOS3", "THBD"],
+            &[("IL1B", 1), ("MAP3K7", 1)],
+        ),
+        make_sig(
+            "LINCS-LIG-LPS-016",
+            "Bacterial Lipopolysaccharide (LPS)",
+            PerturbationKind::LigandStimulus,
+            "Monocyte / Endothelial Consensus (100 ng/mL, 6h)",
+            "TLR4/MyD88-TAK1-IKK engagement triggering acute inflammatory burst",
+            "SigCom LINCS L1000",
+            &["IL1B", "IL6", "TNF", "CXCL8", "CCL2", "ICAM1", "PTGS2", "LCN2", "SOD2"],
+            &["KLF2", "NOS3", "THBD", "PPARG"],
+            &[("TLR4", 1), ("NFKB1", 1)],
+        ),
+        make_sig(
+            "LINCS-KO-RELA-017",
+            "RELA (p65) CRISPR Knockout",
+            PerturbationKind::CrisprKnockout,
+            "Endothelial / HeLa Consensus",
+            "Genetic ablation of NF-kB p65 subunit blocking inflammatory transcription",
+            "SigCom LINCS CRISPR",
+            &["KLF2", "NOS3", "THBD"],
+            &["ICAM1", "VCAM1", "SELE", "CXCL8", "BIRC3", "TNFAIP3", "IL6"],
+            &[("RELA", -1)],
+        ),
+        make_sig(
+            "LINCS-OE-KLF2-018",
+            "KLF2 Lentiviral Overexpression",
+            PerturbationKind::Overexpression,
+            "HUVEC / Arterial Endothelium Consensus",
+            "Ectopic KLF2 restores eNOS/thrombomodulin and suppresses VCAM1/SELE",
+            "SigCom LINCS OE",
+            &["KLF2", "NOS3", "THBD"],
+            &["VCAM1", "SELE", "ICAM1", "CCL2", "CXCL8", "PTGS2"],
+            &[("KLF2", 1)],
+        ),
+        make_sig(
+            "LINCS-LIG-E2-019",
+            "17beta-Estradiol (Physiological ER Agonist)",
+            PerturbationKind::LigandStimulus,
+            "MCF-7 / T47D Luminal Consensus (10 nM, 24h)",
+            "ESR1/NCOA3 ligand activation driving ERE targets and G1/S entry",
+            "SigCom LINCS L1000",
+            &["TFF1", "GREB1", "PGR", "CXCL12", "MYC", "CCND1", "AREG", "BCL2", "CTSD", "E2F1"],
+            &["CDKN1A", "CDKN1B", "FOXO3", "ERBB2"],
+            &[("ESTRADIOL", 1), ("ESR1", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-PALB-020",
+            "Palbociclib (PD-0332991 CDK4/6 Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "MCF-7 / T47D Luminal Breast Consensus (1 uM, 24h)",
+            "Blocks Cyclin D1-CDK4/6 Rb phosphorylation and E2F1 S-phase entry",
+            "SigCom LINCS L1000",
+            &["CDKN1A", "CDKN1B", "FOXO3"],
+            &["E2F1", "PCNA", "MKI67", "CCND1", "MYC"],
+            &[("CCND1", -1), ("E2F1", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-ALPE-021",
+            "MK-2206 / Alpelisib (PI3K-AKT Pathway Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "MCF-7 / Luminal Epithelial Consensus (1 uM, 24h)",
+            "AKT1 inhibition reactivates nuclear FOXO3 and p27/p21 cell-cycle arrest",
+            "SigCom LINCS L1000",
+            &["FOXO3", "CDKN1B", "CDKN1A", "BAX"],
+            &["CCND1", "MYC", "BCL2", "MKI67", "E2F1"],
+            &[("AKT1", -1), ("FOXO3", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-GEFI-022",
+            "Gefitinib (EGFR Tyrosine Kinase Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Epithelial Carcinoma Consensus (1 uM, 24h)",
+            "EGFR blockade attenuating AREG-autocrine mitogenic and survival signaling",
+            "SigCom LINCS L1000",
+            &["CDKN1A", "CDKN1B", "FOXO3"],
+            &["AREG", "MYC", "CCND1", "E2F1", "PCNA", "BCL2"],
+            &[("EGFR", -1)],
+        ),
+        make_sig(
+            "LINCS-CP-NUTL-023",
+            "Nutlin-3a (MDM2-TP53 Checkpoint Activator)",
+            PerturbationKind::SmallMoleculeCompound,
+            "MCF-7 / Wild-Type TP53 Consensus (5 uM, 24h)",
+            "Stabilizes TP53 to induce CDKN1A/BAX arrest and repress E2F1/MKI67",
+            "SigCom LINCS L1000",
+            &["TP53", "CDKN1A", "BAX"],
+            &["E2F1", "PCNA", "MKI67", "CCND1", "BCL2"],
+            &[("TP53", 1), ("CDKN1A", 1)],
+        ),
+        make_sig(
+            "LINCS-KO-ESR1-024",
+            "ESR1 (ER-alpha) CRISPR Knockout",
+            PerturbationKind::CrisprKnockout,
+            "MCF-7 Luminal Epithelial Consensus",
+            "Loss of ER-alpha abolishes ERE transcription and arrests proliferation",
+            "SigCom LINCS CRISPR",
+            &["CDKN1A", "CDKN1B", "FOXO3", "ERBB2"],
+            &["TFF1", "GREB1", "PGR", "CXCL12", "MYC", "CCND1", "XBP1"],
+            &[("ESR1", -1)],
+        ),
+        make_sig(
+            "LINCS-OE-TP53-025",
+            "TP53 cDNA Overexpression",
+            PerturbationKind::Overexpression,
+            "Epithelial / Mesenchymal Consensus",
+            "Ectopic p53 drives CDKN1A/BAX checkpoint and suppresses G1/S targets",
+            "SigCom LINCS OE",
+            &["TP53", "CDKN1A", "BAX"],
+            &["PCNA", "MKI67", "E2F1", "CCND1", "MYC", "BCL2"],
+            &[("TP53", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-CHIR-026",
+            "CHIR-99021 (Selective GSK-3beta Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Mesenchymal / Osteoblast Consensus (3 uM, 24h)",
+            "Inhibits GSK3B destruction complex to stabilize CTNNB1/LEF1/RUNX2",
+            "SigCom LINCS L1000",
+            &["AXIN2", "LEF1", "RUNX2", "SP7", "ALPL", "BGLAP", "MYC", "CCND1"],
+            &["PPARG", "CEBPA"],
+            &[("GSK3B", -1), ("CTNNB1", 1)],
+        ),
+        make_sig(
+            "LINCS-CP-LDN193-027",
+            "LDN-193189 (BMPR / SMAD1 Kinase Inhibitor)",
+            PerturbationKind::SmallMoleculeCompound,
+            "Osteoprogenitor / Mesenchymal Consensus (0.5 uM, 24h)",
+            "Blocks BMP type I/BMPR2-SMAD1 signaling and RUNX2 osteogenic mineralization",
+            "SigCom LINCS L1000",
+            &["PPARG", "CEBPA", "CDKN1A"],
+            &["RUNX2", "SP7", "ALPL", "BGLAP", "COL1A1", "MMP13"],
+            &[("BMPR2", -1), ("SMAD1", -1)],
+        ),
+        make_sig(
+            "LINCS-LIG-BMP2-028",
+            "Recombinant Human BMP-2",
+            PerturbationKind::LigandStimulus,
+            "Mesenchymal / Pre-Osteoblast Consensus (100 ng/mL, 24h)",
+            "BMPR2/SMAD1 activation inducing RUNX2, SP7, ALPL, and BGLAP matrix",
+            "SigCom LINCS L1000",
+            &["RUNX2", "SP7", "ALPL", "BGLAP", "COL1A1", "MMP13"],
+            &["PPARG", "CEBPA"],
+            &[("BMP2", 1), ("BMPR2", 1), ("SMAD1", 1)],
+        ),
+        make_sig(
+            "LINCS-KO-CTNNB1-029",
+            "CTNNB1 (beta-Catenin) CRISPR Knockout",
+            PerturbationKind::CrisprKnockout,
+            "Osteoprogenitor / Colon Epithelial Consensus",
+            "Abrogates canonical Wnt/TCF-LEF transcriptional program",
+            "SigCom LINCS CRISPR",
+            &["PPARG", "CEBPA", "CDKN1A"],
+            &["AXIN2", "LEF1", "MYC", "CCND1", "RUNX2", "BGLAP"],
+            &[("CTNNB1", -1)],
+        ),
+        make_sig(
+            "LINCS-OE-RUNX2-030",
+            "RUNX2 cDNA Overexpression",
+            PerturbationKind::Overexpression,
+            "Mesenchymal Stromal Consensus",
+            "Master osteoblast transcription factor driving SP7, ALPL, BGLAP & COL1A1",
+            "SigCom LINCS OE",
+            &["RUNX2", "SP7", "ALPL", "BGLAP", "COL1A1", "MMP13"],
+            &["PPARG", "CEBPA"],
+            &[("RUNX2", 1)],
+        ),
     ];
 
     kg.rebuild_indices();

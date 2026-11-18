@@ -72,8 +72,9 @@ pub use perturb::{
     PerturbationHit,
 };
 pub use ura::{
-    build_mechanistic_network, run_upstream_regulators, MechanisticEdge, MechanisticNetwork,
-    PredictedState, UpstreamRegulatorHit,
+    build_mechanistic_network, format_z_2dp, round_z_2dp, run_upstream_regulators,
+    select_stratified_mechanistic_targets, MechanisticEdge, MechanisticNetwork, PredictedState,
+    UpstreamRegulatorHit,
 };
 
 /// Tunable thresholds and algorithmic parameters for a full Core Analysis run.

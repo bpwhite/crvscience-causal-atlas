@@ -117,12 +117,10 @@ pub fn run_downstream_effects(
                 )
             });
 
-        let predicted_direction = if z >= 2.0 {
-            "Increased".to_string()
-        } else if z <= -2.0 {
-            "Decreased".to_string()
-        } else {
-            "Affected".to_string()
+        let predicted_direction = match PredictedState::from_z(z) {
+            PredictedState::Activated => "Increased".to_string(),
+            PredictedState::Inhibited => "Decreased".to_string(),
+            PredictedState::Neutral => "Affected".to_string(),
         };
 
         overlap_genes.sort();

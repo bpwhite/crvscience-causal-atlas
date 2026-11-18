@@ -416,6 +416,16 @@ fn t2_kramer_causal_z_and_fisher_upstream_regulators_ranking() {
         .iter()
         .filter(|h| h.predicted_state == PredictedState::Activated && h.fdr <= 0.05)
         .count();
+    for h in &ura_hits {
+        let disp = format!("{:+.2}", h.activation_z);
+        if disp == "+2.00" {
+            assert_eq!(h.predicted_state, PredictedState::Activated, "{}", h.regulator_id);
+        } else if disp == "-2.00" {
+            assert_eq!(h.predicted_state, PredictedState::Inhibited, "{}", h.regulator_id);
+        } else if h.activation_z.abs() < 2.0 {
+            assert_eq!(h.predicted_state, PredictedState::Neutral, "{}", h.regulator_id);
+        }
+    }
     let significant_inhibited = ura_hits
         .iter()
         .filter(|h| h.predicted_state == PredictedState::Inhibited && h.fdr <= 0.05)

@@ -215,7 +215,7 @@ pub struct PathwayDef {
 
 impl PathwayDef {
     /// Returns spacious `(x, y)` normalized coordinates in `[0.02, 0.98]`, preserving explicit GPML/curated
-    /// coordinates when available and computing a deterministic non-overlapping radiative-forcing
+    /// coordinates when available and computing a deterministic non-overlapping force-directed
     /// subcellular compartment layout otherwise.
     pub fn resolve_layout_coords(&self, kg: &KnowledgeGraph) -> BTreeMap<String, (f32, f32)> {
         crate::layout::resolve_normalized_pathway_coords(self, kg)
@@ -253,6 +253,8 @@ pub struct PerturbationSignature {
     pub source_url: String,
     pub up_genes: Vec<String>,
     pub down_genes: Vec<String>,
+    #[serde(default)]
+    pub target_clamps: Vec<(String, i8)>,
 }
 
 /// Unified in-memory knowledge graph assembled exclusively from open-source streams.

@@ -121,7 +121,7 @@
     "significant_activated_count": 5,
     "significant_inhibited_count": 1,
     "csv_output_path": "validation/upstream_regulators_ranked.csv",
-    "csv_bytes": 1862,
+    "csv_bytes": 1860,
     "top_regulators": [
       {
         "rank": 1,
@@ -212,7 +212,7 @@
         "regulator_id": "KLF2",
         "regulator_name": "Kruppel Like Factor 2",
         "kind": "TranscriptionRegulator",
-        "predicted_state": "Unresolved",
+        "predicted_state": "Inhibited",
         "activation_z": -1.9996374319488632,
         "bias_corrected_z": -1.9996374319488632,
         "overlap_count": 4,
@@ -226,7 +226,7 @@
         "regulator_id": "STAT1",
         "regulator_name": "Signal Transducer and Activator of Transcription 1",
         "kind": "TranscriptionRegulator",
-        "predicted_state": "Unresolved",
+        "predicted_state": "Activated",
         "activation_z": 1.9981993283808366,
         "bias_corrected_z": 1.0250546270349163,
         "overlap_count": 4,
@@ -420,10 +420,19 @@
     "sost_wnt_cohort_sost_log2fc": -0.35,
     "sost_wnt_inferred_root_z": -4.123105625617661,
     "sost_wnt_inferred_root_network_bias_p": 0.000999000999000999,
-    "perturbation_signatures_scored": 7,
-    "reversers_count": 2,
-    "mimickers_count": 1,
+    "perturbation_signatures_scored": 30,
+    "reversers_count": 10,
+    "mimickers_count": 4,
     "top_reversers": [
+      {
+        "signature_id": "LINCS-OE-KLF2-018",
+        "perturbagen": "KLF2 Lentiviral Overexpression",
+        "mode": "Reverser (Candidate Antagonist)",
+        "connectivity_score": -94.50000000000001,
+        "mechanism_of_action": "Ectopic KLF2 restores eNOS/thrombomodulin and suppresses VCAM1/SELE",
+        "matched_up_count": 3,
+        "matched_down_count": 6
+      },
       {
         "signature_id": "LINCS-CP-IKK16-002",
         "perturbagen": "BMS-345541 (Selective IKK-beta Inhibitor)",
@@ -434,16 +443,43 @@
         "matched_down_count": 9
       },
       {
-        "signature_id": "LINCS-CP-DEX-001",
-        "perturbagen": "Dexamethasone",
+        "signature_id": "LINCS-CP-TPCA1-008",
+        "perturbagen": "TPCA-1 (IKK-2 / NF-kB Inhibitor)",
         "mode": "Reverser (Candidate Antagonist)",
-        "connectivity_score": -75.89495798319328,
-        "mechanism_of_action": "Glucocorticoid receptor (NR3C1) agonist; NF-kB transrepressor",
+        "connectivity_score": -93.5133689839572,
+        "mechanism_of_action": "ATP-competitive IKBKB kinase inhibitor suppressing cytokine & adhesion genes",
         "matched_up_count": 3,
-        "matched_down_count": 10
+        "matched_down_count": 8
+      },
+      {
+        "signature_id": "LINCS-KO-RELA-017",
+        "perturbagen": "RELA (p65) CRISPR Knockout",
+        "mode": "Reverser (Candidate Antagonist)",
+        "connectivity_score": -92.70000000000002,
+        "mechanism_of_action": "Genetic ablation of NF-kB p65 subunit blocking inflammatory transcription",
+        "matched_up_count": 3,
+        "matched_down_count": 7
+      },
+      {
+        "signature_id": "LINCS-CP-SIMV-012",
+        "perturbagen": "Simvastatin (HMG-CoA Reductase Inhibitor)",
+        "mode": "Reverser (Candidate Antagonist)",
+        "connectivity_score": -84.86470588235294,
+        "mechanism_of_action": "Induces endothelial KLF2/NOS3/THBD vasoprotection and represses VCAM1",
+        "matched_up_count": 4,
+        "matched_down_count": 6
       }
     ],
     "top_mimickers": [
+      {
+        "signature_id": "LINCS-LIG-IL1B-015",
+        "perturbagen": "Recombinant Human IL-1beta",
+        "mode": "Mimicker (Concordant Agonist)",
+        "connectivity_score": 91.3475935828877,
+        "mechanism_of_action": "MAP3K7/IKK/NF-kB activation inducing endothelial chemokines & COX-2",
+        "matched_up_count": 8,
+        "matched_down_count": 3
+      },
       {
         "signature_id": "LINCS-LIG-TNF-003",
         "perturbagen": "Recombinant Human TNF-alpha",
@@ -452,6 +488,24 @@
         "mechanism_of_action": "TNFRSF1A agonist activating canonical IKK/NF-kB & JNK",
         "matched_up_count": 10,
         "matched_down_count": 3
+      },
+      {
+        "signature_id": "LINCS-LIG-IFNG-014",
+        "perturbagen": "Recombinant Human IFN-gamma",
+        "mode": "Mimicker (Concordant Agonist)",
+        "connectivity_score": 85.1029411764706,
+        "mechanism_of_action": "IFNGR1/JAK1/STAT1 activation driving IRF1 and CXCL10 expression",
+        "matched_up_count": 6,
+        "matched_down_count": 2
+      },
+      {
+        "signature_id": "LINCS-LIG-LPS-016",
+        "perturbagen": "Bacterial Lipopolysaccharide (LPS)",
+        "mode": "Mimicker (Concordant Agonist)",
+        "connectivity_score": 67.94796380090497,
+        "mechanism_of_action": "TLR4/MyD88-TAK1-IKK engagement triggering acute inflammatory burst",
+        "matched_up_count": 7,
+        "matched_down_count": 4
       }
     ]
   }

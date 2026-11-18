@@ -5,8 +5,8 @@ rank,regulator_id,regulator_name,kind,predicted_state,activation_z,bias_correcte
 4,LPS,Lipopolysaccharide (TLR4 Agonist),ChemicalDrug,Activated,2.827888,1.450676,true,8,8,7.700101e-4,2.502533e-3,NA,17 targets (2 regulators)
 5,DEXAMETHASONE,Dexamethasone,ChemicalDrug,Inhibited,-2.644962,-1.356837,true,7,7,2.117528e-3,5.505572e-3,NA,
 6,IFNG,Interferon Gamma,Cytokine,Activated,2.234670,1.146361,true,5,5,1.432445e-2,3.103632e-2,NA,5 targets (2 regulators)
-7,KLF2,Kruppel Like Factor 2,TranscriptionRegulator,Unresolved,-1.999637,-1.999637,false,4,4,3.543417e-2,5.758053e-2,-2.3800,
-8,STAT1,Signal Transducer and Activator of Transcription 1,TranscriptionRegulator,Unresolved,1.998199,1.025055,true,4,4,3.543417e-2,5.758053e-2,1.9200,
+7,KLF2,Kruppel Like Factor 2,TranscriptionRegulator,Inhibited,-1.999637,-1.999637,false,4,4,3.543417e-2,5.758053e-2,-2.3800,
+8,STAT1,Signal Transducer and Activator of Transcription 1,TranscriptionRegulator,Activated,1.998199,1.025055,true,4,4,3.543417e-2,5.758053e-2,1.9200,
 9,CTNNB1,Catenin Beta 1 (beta-Catenin),TranscriptionRegulator,Unresolved,1.731904,1.282529,true,3,8,8.026640e-1,9.984611e-1,NA,
 10,FULVESTRANT,Fulvestrant (SERD),ChemicalDrug,Unresolved,-1.414214,-0.938083,true,2,6,8.535670e-1,9.984611e-1,NA,
 11,ESTRADIOL,17beta-Estradiol,ChemicalDrug,Unresolved,1.414194,0.852791,true,2,10,9.865405e-1,9.984611e-1,NA,

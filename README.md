@@ -8,7 +8,7 @@
 
 - **100% Independent Implementation**: Built from peer-reviewed statistical and graph-theoretic publications ([Krämer et al., 2014, PMC3928520](https://pmc.ncbi.nlm.nih.gov/articles/PMC3928520/)) without referencing proprietary SDKs, APIs, or commercial knowledge bases.
 - **Zero External Runtime Dependencies**:
-  - Enforces `#![forbid(unsafe_code)]` across all workspace crates (`ca-core`, `ca-streams`, `ca-app`).
+  - Enforces `#![forbid(unsafe_code)]` across `ca-core`, `ca-streams`, and all `ca-app` UI/export modules (with `ca-app/src/main.rs` using `#![deny(unsafe_code)]` solely for bounded Win32 parent-console attachment on CLI invocations).
   - Statically bundles SQLite 3 (`rusqlite` with `bundled` feature) in **WAL (`Write-Ahead Logging`)** mode — no external system `libsqlite3`, R, Python, Java, or OpenSSL (`openssl-sys`) required.
   - Uses pure-Rust TLS (`ureq` + `rustls`) and pure-Rust `.zip` / `.gz` archive extraction (`zip` + `flate2` `miniz_oxide`) for batch GPML and GMT synchronization.
 

@@ -238,10 +238,10 @@ pub fn render_treemap_svg(dataset_name: &str, rects: &[TreeMapRect]) -> String {
             );
             let _ = writeln!(
                 &mut svg,
-                r##"<text x="{:.1}" y="{:.1}" font-size="10" fill="#1E293B">z = {:+.2} | -log10(p) = {:.1}</text>"##,
+                r##"<text x="{:.1}" y="{:.1}" font-size="10" fill="#1E293B">z = {} | -log10(p) = {:.1}</text>"##,
                 rx + 6.0,
                 ry + 30.0,
-                r.activation_z,
+                ca_core::format_z_2dp(r.activation_z),
                 r.neg_log10_p
             );
         }

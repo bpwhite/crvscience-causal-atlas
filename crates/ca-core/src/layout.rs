@@ -21,9 +21,9 @@ use crate::graph::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
-/// Default anisotropic radiative repulsion radii (`rx`, `ry`) in virtual world pixels.
-pub const RADIATIVE_RX: f32 = 92.0;
-pub const RADIATIVE_RY: f32 = 48.0;
+/// Default anisotropic inverse-square repulsion radii (`rx`, `ry`) in virtual world pixels.
+pub const REPULSION_RX: f32 = 92.0;
+pub const REPULSION_RY: f32 = 48.0;
 
 /// Ideal Hooke spring rest length in virtual world pixels.
 pub const HOOKE_IDEAL_LEN: f32 = 155.0;
@@ -144,10 +144,10 @@ fn band_corridor_y(band: usize, world_h: f32) -> (f32, f32, f32) {
     }
 }
 
-/// Runs 120 deterministic iterations of anisotropic radiative inverse-square repulsion,
+/// Runs 120 deterministic iterations of anisotropic inverse-square repulsion,
 /// Hooke spring edge attraction, compartment Y-band restoring forces, and hard minimum
 /// bounding-box overlap projection (`min_dx`, `min_dy`).
-fn solve_radiative_compartment_layout(
+fn solve_compartment_force_layout(
     node_ids: &[String],
     node_bands: &[usize],
     node_target_y: &[f32],
@@ -180,11 +180,11 @@ fn solve_radiative_compartment_layout(
         let mut disp_x = vec![0.0f32; n];
         let mut disp_y = vec![0.0f32; n];
         let center_x = world_w * 0.5;
-        let rx = RADIATIVE_RX.max(min_dx);
-        let ry = RADIATIVE_RY.max(min_dy);
+        let rx = REPULSION_RX.max(min_dx);
+        let ry = REPULSION_RY.max(min_dy);
         let inv_rx2 = 1.0 / (rx * rx);
         let inv_ry2 = 1.0 / (ry * ry);
-        let cutoff_r2 = 16.0f32; // ~(4x radiative radius)^2
+        let cutoff_r2 = 16.0f32; // ~(4x repulsion radius)^2
 
         for iter in 0..LAYOUT_ITERATIONS {
             disp_x.fill(0.0);
@@ -193,7 +193,7 @@ fn solve_radiative_compartment_layout(
             let progress = iter as f32 / LAYOUT_ITERATIONS as f32;
             let max_step = (28.0 * (1.0 - 0.72 * progress)).max(5.0);
 
-            // 1. Anisotropic radiative inverse-square repulsion across pairs
+            // 1. Anisotropic inverse-square repulsion across pairs
             for i in 0..n {
                 let (xi, yi) = pos[i];
                 for j in (i + 1)..n {
@@ -627,8 +627,8 @@ pub fn compute_pathway_world_layout_uncached(
     }
 
     // Preserve hand-curated GPML / seed coordinates with strict non-overlap projection;
-    // run full 120-iteration Radiative Forcing + Hooke Spring + 5-band physics otherwise.
-    let solved = solve_radiative_compartment_layout(
+    // run full 120-iteration Inverse-Square Repulsion + Hooke Spring + 5-band physics otherwise.
+    let solved = solve_compartment_force_layout(
         &node_ids,
         &node_bands,
         &target_y,
@@ -871,7 +871,7 @@ pub fn compute_tiered_causal_layout(
         })
         .collect();
 
-    let solved = solve_radiative_compartment_layout(
+    let solved = solve_compartment_force_layout(
         &node_ids,
         &node_bands,
         &target_y,
@@ -930,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn radiative_layout_144_nodes_has_zero_overlap_and_induces_edges() {
+    fn compartment_force_layout_144_nodes_has_zero_overlap_and_induces_edges() {
         let mut kg = KnowledgeGraph::new();
         let mut members = Vec::with_capacity(144);
 
