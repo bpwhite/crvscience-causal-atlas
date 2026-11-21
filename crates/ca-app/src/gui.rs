@@ -236,9 +236,20 @@ impl CausalAtlasApp {
         let palette_mode = WorkbenchPaletteMode::AcademicDark;
         apply_workbench_visuals(ctx, palette_mode);
 
-        let mut db = SqliteKnowledgeStore::open(&db_path)
-            .or_else(|_| SqliteKnowledgeStore::open_in_memory())
-            .expect("SQLite store initialization must succeed");
+        let mut db_fallback_warn: Option<String> = None;
+        let mut db = match SqliteKnowledgeStore::open(&db_path) {
+            Ok(store) => store,
+            Err(err) => {
+                let warn_msg = format!(
+                    "[WARN] Failed opening SQLite store at {} ({err}); falling back to in-memory store",
+                    db_path.display()
+                );
+                eprintln!("{warn_msg}");
+                db_fallback_warn = Some(warn_msg);
+                SqliteKnowledgeStore::open_in_memory()
+                    .expect("SQLite store initialization must succeed")
+            }
+        };
         let _ = db.ensure_seeded(build_seed_knowledge_graph);
 
         let kg = db
@@ -339,15 +350,23 @@ impl CausalAtlasApp {
             camera_anim_progress: 1.0,
             batch_progress_fraction: 0.0,
             batch_progress_label: "Idle — SQLite WAL cache ready".to_string(),
-            sync_logs: vec![format!(
-                "Opened SQLite WAL store ({} pathways, {} signed edges, {} cached reports)",
-                db_stats.cached_pathways, db_stats.cached_edges, db_stats.cached_analysis_reports
-            )],
+            sync_logs: {
+                let mut logs = vec![format!(
+                    "Opened SQLite WAL store ({} pathways, {} signed edges, {} cached reports)",
+                    db_stats.cached_pathways, db_stats.cached_edges, db_stats.cached_analysis_reports
+                )];
+                if let Some(ref warn) = db_fallback_warn {
+                    logs.push(warn.clone());
+                }
+                logs
+            },
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            status_banner: format!(
-                "SQLite WAL active ({}) — {} cache hits, {} computed",
-                db_stats.db_path, hits, misses
-            ),
+            status_banner: db_fallback_warn.unwrap_or_else(|| {
+                format!(
+                    "SQLite WAL active ({}) — {} cache hits, {} computed",
+                    db_stats.db_path, hits, misses
+                )
+            }),
             worker_busy: false,
             tx,
             rx,
@@ -391,14 +410,30 @@ impl CausalAtlasApp {
                     self.worker_busy = false;
                     self.batch_progress_fraction = 1.0;
                     self.refresh_from_sqlite();
-                    let msg = format!(
-                        "Batch sync finished: {} checked, {} cache hits, {} downloaded (+{} pathways, +{} edges)",
-                        sum.streams_checked,
-                        sum.cache_hits,
-                        sum.streams_downloaded,
-                        sum.pathways_ingested,
-                        sum.causal_edges_ingested
-                    );
+                    let msg = if sum.errors.is_empty() {
+                        format!(
+                            "Batch sync finished: {} checked, {} cache hits, {} downloaded (+{} pathways, +{} edges)",
+                            sum.streams_checked,
+                            sum.cache_hits,
+                            sum.streams_downloaded,
+                            sum.pathways_ingested,
+                            sum.causal_edges_ingested
+                        )
+                    } else {
+                        for err in &sum.errors {
+                            self.sync_logs.push(format!("[ERROR] {err}"));
+                        }
+                        format!(
+                            "Batch sync finished with {} error(s): {} ({} checked, {} cache hits, {} downloaded, +{} pathways, +{} edges)",
+                            sum.errors.len(),
+                            sum.errors.join("; "),
+                            sum.streams_checked,
+                            sum.cache_hits,
+                            sum.streams_downloaded,
+                            sum.pathways_ingested,
+                            sum.causal_edges_ingested
+                        )
+                    };
                     self.batch_progress_label = msg.clone();
                     self.status_banner = msg.clone();
                     self.sync_logs.push(msg);
@@ -1144,6 +1179,7 @@ impl eframe::App for CausalAtlasApp {
 }
 
 impl CausalAtlasApp {
+    #[allow(dead_code)]
     pub fn configure_huvec_tnf_screenshot_state(&mut self, ctx: &egui::Context) {
         self.configure_screenshot_view(ctx, 1);
     }
@@ -1200,17 +1236,38 @@ impl CausalAtlasApp {
             ctx.request_repaint();
         }
 
-        // Global Ctrl+F / Cmd+F shortcut to focus Omnibox
+        let pal = ScientificPalette::for_mode(self.palette_mode);
+        let mut actions: Vec<GuiAction> = Vec::new();
+        let wants_kb = ctx.wants_keyboard_input();
+
+        // Global shortcuts: Ctrl/Cmd+F (Omnibox), F1 (About), layered Escape, Ctrl/Cmd+O/S
         if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F)) {
             self.omnibox_focus_requested = true;
             self.omnibox_dropdown_open = true;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.omnibox_dropdown_open = false;
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.about_open = !self.about_open;
         }
-
-        let pal = ScientificPalette::for_mode(self.palette_mode);
-        let mut actions: Vec<GuiAction> = Vec::new();
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.omnibox_dropdown_open {
+                self.omnibox_dropdown_open = false;
+            } else if self.about_open {
+                self.about_open = false;
+            } else if self.pathway_fullscreen {
+                self.pathway_fullscreen = false;
+                self.pathway_fit_pending = true;
+            }
+        }
+        if !wants_kb
+            && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::O))
+        {
+            actions.push(GuiAction::ImportDatasetDialog);
+        }
+        if !wants_kb
+            && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::S))
+        {
+            actions.push(GuiAction::ExportJsonReportDialog);
+        }
 
         egui::TopBottomPanel::top("top_nav").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -1329,6 +1386,7 @@ impl CausalAtlasApp {
                             egui::Slider::new(&mut self.config.abs_log2fc_cutoff, 0.25..=3.0)
                                 .text("|log2FC|"),
                         )
+                        .on_hover_text("Minimum absolute log2 fold-change threshold for including differentially expressed genes in causal scoring")
                         .changed();
                     cutoff_changed |= ui
                         .add(
@@ -1336,12 +1394,14 @@ impl CausalAtlasApp {
                                 .logarithmic(true)
                                 .text("Max FDR"),
                         )
+                        .on_hover_text("Maximum Benjamini-Hochberg adjusted p-value (FDR) cutoff for significant dataset molecules")
                         .changed();
                     cutoff_changed |= ui
                         .add(
                             egui::Slider::new(&mut self.config.cna_max_depth, 1..=3)
                                 .text("CNA Hop K"),
                         )
+                        .on_hover_text("Maximum directed causal path length (1 to 3 hops) explored by Multi-Hop Causal Network Analysis")
                         .changed();
 
                     ui.horizontal(|ui| {
@@ -1386,8 +1446,10 @@ impl CausalAtlasApp {
                             );
                             ui.end_row();
 
-                            ui.label("Sign Skew (mu_2):");
-                            ui.label(format!("{:+.2}", sum.mean_sign_skew));
+                            ui.label("Sign Skew (mu_2):")
+                                .on_hover_text("Mean signed fold-change polarity balance across active DEGs (used for Kramer bias-corrected Z-score calibration)");
+                            ui.label(format!("{:+.2}", sum.mean_sign_skew))
+                                .on_hover_text("Mean signed fold-change polarity balance across active DEGs (used for Kramer bias-corrected Z-score calibration)");
                             ui.end_row();
                         });
 
@@ -1862,7 +1924,7 @@ impl CausalAtlasApp {
             let (resp, painter) = cols[0].allocate_painter(plot_size, Sense::hover());
             let rect = resp.rect;
             painter.rect_filled(rect, 6.0, pal.bg_canvas);
-            painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+            painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.grid_line));
 
             let max_x = ds
                 .rows
@@ -1895,7 +1957,7 @@ impl CausalAtlasApp {
             let x_pos = map_pt(fc_cut, 0.0).x;
             let x_neg = map_pt(-fc_cut, 0.0).x;
             let y_q = map_pt(0.0, -q_cut.max(1e-25).log10()).y;
-            let guide_stroke = Stroke::new(1.0, pal.grid_line);
+            let guide_stroke = Stroke::new(1.0_f32, pal.grid_line);
             painter.line_segment(
                 [Pos2::new(x_pos, inner.top()), Pos2::new(x_pos, inner.bottom())],
                 guide_stroke,
@@ -2396,7 +2458,7 @@ impl CausalAtlasApp {
                             let fill = lerp_color(pal.bg_panel, accent, 0.22);
                             egui::Frame::none()
                                 .fill(fill)
-                                .stroke(Stroke::new(1.0, accent))
+                                .stroke(Stroke::new(1.0_f32, accent))
                                 .rounding(4.0)
                                 .inner_margin(egui::Margin::symmetric(5.0, 2.0))
                                 .show(ui, |ui| {
@@ -2473,7 +2535,7 @@ impl CausalAtlasApp {
                 let rect = resp.rect;
                 let painter = painter.with_clip_rect(rect);
                 painter.rect_filled(rect, 6.0, pal.bg_canvas);
-                painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+                painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.grid_line));
 
                 let world_center = Pos2::new(wl.world_w * 0.5, wl.world_h * 0.5);
 
@@ -2666,7 +2728,7 @@ impl CausalAtlasApp {
 
                 let org_l = to_screen(48.0, wl.bands.organelle_divider_y);
                 let org_r = to_screen(wl.world_w - 48.0, wl.bands.organelle_divider_y);
-                painter.line_segment([org_l, org_r], Stroke::new(1.2, pal.grid_line));
+                painter.line_segment([org_l, org_r], Stroke::new(1.2_f32, pal.grid_line));
 
                 let nm_l = to_screen(52.0, wl.bands.nuclear_envelope_y);
                 let nm_r = to_screen(wl.world_w - 52.0, wl.bands.nuclear_envelope_y);
@@ -2859,11 +2921,11 @@ impl CausalAtlasApp {
                         }
 
                         let border = if is_sel || st.user_clamp.is_some() {
-                            Stroke::new(2.4, Color32::from_rgb(250, 204, 21))
+                            Stroke::new(2.4_f32, Color32::from_rgb(250, 204, 21))
                         } else if st.observed_log2fc.is_some() {
-                            Stroke::new(1.8, pal.text_primary)
+                            Stroke::new(1.8_f32, pal.text_primary)
                         } else {
-                            Stroke::new(1.2, pal.border_default)
+                            Stroke::new(1.2_f32, pal.border_default)
                         };
 
                         draw_entity_glyph(&painter, pos, half_ext, kind, fill, border);
@@ -2959,9 +3021,9 @@ impl CausalAtlasApp {
                         Pos2::new(minimap_rect.left(), minimap_rect.top() + minimap_header_h),
                         Pos2::new(minimap_rect.right(), minimap_rect.top() + minimap_header_h),
                     ],
-                    Stroke::new(1.0, pal.grid_line),
+                    Stroke::new(1.0_f32, pal.grid_line),
                 );
-                painter.rect_stroke(minimap_rect, 5.0, Stroke::new(1.2, pal.border_default));
+                painter.rect_stroke(minimap_rect, 5.0, Stroke::new(1.2_f32, pal.border_default));
 
                 let map_to_mini = |wx: f32, wy: f32| -> Pos2 {
                     Pos2::new(
@@ -2979,14 +3041,14 @@ impl CausalAtlasApp {
                         Pos2::new(minimap_inner.left(), mm_pm_y),
                         Pos2::new(minimap_inner.right(), mm_pm_y),
                     ],
-                    Stroke::new(0.8, pal.grid_line),
+                    Stroke::new(0.8_f32, pal.grid_line),
                 );
                 painter.line_segment(
                     [
                         Pos2::new(minimap_inner.left(), mm_nm_y),
                         Pos2::new(minimap_inner.right(), mm_nm_y),
                     ],
-                    Stroke::new(0.8, pal.grid_line),
+                    Stroke::new(0.8_f32, pal.grid_line),
                 );
 
                 for edge in &wl.edges {
@@ -2995,7 +3057,7 @@ impl CausalAtlasApp {
                     {
                         painter.line_segment(
                             [map_to_mini(wp1.x, wp1.y), map_to_mini(wp2.x, wp2.y)],
-                            Stroke::new(0.7, Color32::from_rgba_unmultiplied(120, 136, 160, 110)),
+                            Stroke::new(0.7_f32, Color32::from_rgba_unmultiplied(120, 136, 160, 110)),
                         );
                     }
                 }
@@ -3034,7 +3096,7 @@ impl CausalAtlasApp {
                 painter.rect_stroke(
                     vp_rect,
                     2.0,
-                    Stroke::new(1.4, Color32::from_rgb(56, 189, 248)),
+                    Stroke::new(1.4_f32, Color32::from_rgb(56, 189, 248)),
                 );
                 painter.text(
                     Pos2::new(minimap_rect.left() + 7.0, minimap_rect.top() + minimap_header_h * 0.5),
@@ -3272,7 +3334,7 @@ impl CausalAtlasApp {
                 let rect = resp.rect;
                 let painter = painter.with_clip_rect(rect);
                 painter.rect_filled(rect, 6.0, pal.bg_canvas);
-                painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+                painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.grid_line));
 
                 let world_center = Pos2::new(tiered.world_w * 0.5, tiered.world_h * 0.5);
                 if self.ura_fit_pending {
@@ -3405,7 +3467,7 @@ impl CausalAtlasApp {
                             Vec2::new((34.0 * zoom).max(20.0), (17.0 * zoom).max(11.0)),
                             kind,
                             pal.color_for_z(z),
-                            Stroke::new(2.0, pal.text_primary),
+                            Stroke::new(2.0_f32, pal.text_primary),
                         );
                         painter.text(
                             p,
@@ -3425,7 +3487,7 @@ impl CausalAtlasApp {
                             Vec2::new((28.0 * zoom).max(18.0), (14.0 * zoom).max(10.0)),
                             EntityKind::GeneOther,
                             pal.color_for_log2fc(tg.fc),
-                            Stroke::new(1.3, pal.border_default),
+                            Stroke::new(1.3_f32, pal.border_default),
                         );
                         painter.text(
                             p,
@@ -3579,7 +3641,7 @@ impl CausalAtlasApp {
                 painter.rect_stroke(
                     cell,
                     3.0,
-                    Stroke::new(if is_sel { 2.4 } else { 1.0 }, pal.text_primary),
+                    Stroke::new(if is_sel { 2.4 } else { 1.0_f32 }, pal.text_primary),
                 );
 
                 if cell.width() > 68.0 && cell.height() > 26.0 {
@@ -3732,7 +3794,7 @@ impl CausalAtlasApp {
             let rect = resp.rect;
             let painter = painter.with_clip_rect(rect);
             painter.rect_filled(rect, 6.0, pal.bg_canvas);
-            painter.rect_stroke(rect, 6.0, Stroke::new(1.0, pal.grid_line));
+            painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.grid_line));
 
             let world_center = Pos2::new(tiered.world_w * 0.5, tiered.world_h * 0.5);
             if self.re_fit_pending {
@@ -3858,7 +3920,7 @@ impl CausalAtlasApp {
                         Vec2::new((42.0 * zoom).max(24.0), (18.0 * zoom).max(11.0)),
                         EntityKind::TranscriptionRegulator,
                         pal.color_for_z(*z),
-                        Stroke::new(2.0, pal.text_primary),
+                        Stroke::new(2.0_f32, pal.text_primary),
                     );
                     painter.text(
                         p,
@@ -3878,7 +3940,7 @@ impl CausalAtlasApp {
                         Vec2::new((28.0 * zoom).max(18.0), (14.0 * zoom).max(9.0)),
                         EntityKind::GeneOther,
                         pal.color_for_log2fc(*fc),
-                        Stroke::new(1.5, pal.text_primary),
+                        Stroke::new(1.5_f32, pal.text_primary),
                     );
                     painter.text(
                         p,
@@ -3899,7 +3961,7 @@ impl CausalAtlasApp {
                         Vec2::new((92.0 * zoom).max(46.0), (19.0 * zoom).max(12.0)),
                         EntityKind::BiologicalProcess,
                         pal.color_for_z(*pz),
-                        Stroke::new(2.0, pal.text_primary),
+                        Stroke::new(2.0_f32, pal.text_primary),
                     );
                     painter.text(
                         p,
@@ -4665,6 +4727,110 @@ mod tests {
         app.apply_action(&ctx, GuiAction::ClearAllClamps);
         assert!(app.map_user_clamps.is_empty());
         assert!(app.active_drug_rescue_name.is_none());
+
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn batch_finished_surfaces_errors_in_status_banner_and_sync_logs() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "causal_atlas_batch_err_test_{}.sqlite3",
+            std::process::id()
+        ));
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+        app.worker_busy = true;
+
+        let summary = BatchSyncSummary {
+            streams_checked: 5,
+            cache_hits: 3,
+            streams_downloaded: 1,
+            pathways_ingested: 12,
+            causal_edges_ingested: 40,
+            errors: vec!["WikiPathways GPML index timed out".to_string()],
+        };
+        app.tx
+            .send(WorkerMessage::BatchFinished(summary))
+            .expect("send BatchFinished");
+        app.poll_worker();
+
+        assert!(!app.worker_busy);
+        assert!(app.status_banner.contains("WikiPathways GPML index timed out"));
+        assert!(app
+            .sync_logs
+            .iter()
+            .any(|line| line.contains("[ERROR] WikiPathways GPML index timed out")));
+
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn headless_f1_and_layered_escape_dismissal_priority() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "causal_atlas_shortcut_test_{}.sqlite3",
+            std::process::id()
+        ));
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+
+        let step_key = |app: &mut CausalAtlasApp, key: egui::Key| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |c| app.render_ui_frame(c));
+        };
+
+        app.omnibox_dropdown_open = true;
+        app.pathway_fullscreen = true;
+        app.pathway_fit_pending = false;
+        app.pathway_pan = Vec2::new(123.0, -77.0);
+        app.pathway_zoom = 2.75;
+        assert!(!app.about_open);
+
+        // F1 toggles About open
+        step_key(&mut app, egui::Key::F1);
+        assert!(app.about_open);
+
+        // 1st Escape closes omnibox_dropdown_open first
+        step_key(&mut app, egui::Key::Escape);
+        assert!(!app.omnibox_dropdown_open);
+        assert!(app.about_open);
+        assert!(app.pathway_fullscreen);
+        assert_eq!(app.pathway_pan, Vec2::new(123.0, -77.0));
+
+        // 2nd Escape closes about_open next
+        step_key(&mut app, egui::Key::Escape);
+        assert!(!app.about_open);
+        assert!(app.pathway_fullscreen);
+        assert_eq!(app.pathway_pan, Vec2::new(123.0, -77.0));
+
+        // 3rd Escape exits pathway_fullscreen and triggers pathway_fit_pending refit
+        step_key(&mut app, egui::Key::Escape);
+        assert!(!app.pathway_fullscreen);
+        assert_eq!(app.pathway_pan, Vec2::ZERO);
+        assert!((app.pathway_zoom - 2.75).abs() > 1e-3);
+
+        // On another tab, exiting pathway_fullscreen leaves pathway_fit_pending = true until returning
+        app.active_tab = WorkbenchTab::CohortVolcano;
+        app.pathway_fullscreen = true;
+        app.pathway_fit_pending = false;
+        step_key(&mut app, egui::Key::Escape);
+        assert!(!app.pathway_fullscreen);
+        assert!(app.pathway_fit_pending);
 
         drop(app);
         for suffix in ["", "-wal", "-shm"] {

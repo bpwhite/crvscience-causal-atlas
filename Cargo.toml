@@ -11,7 +11,6 @@ version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["CRV Science / Clean-Room Systems Biology Contributors"]
-description = "Standalone native Rust causal pathway, upstream regulator, and network inference workbench with SQLite WAL caching and open-source batch stream downloaders"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }

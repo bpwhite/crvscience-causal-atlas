@@ -17,6 +17,7 @@
 
 use ca_core::CoreAnalysisReport;
 use crossterm::{
+    cursor,
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -32,12 +33,57 @@ use ratatui::{
 use std::io;
 use std::time::Duration;
 
+fn restore_terminal_buffer<W: io::Write>(out: &mut W) -> io::Result<()> {
+    execute!(out, LeaveAlternateScreen, cursor::Show)
+}
+
+struct TuiSessionGuard {
+    active: bool,
+    cleanup: Option<Box<dyn FnOnce()>>,
+}
+
+impl TuiSessionGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(err);
+        }
+        Ok(Self::from_cleanup(Box::new(|| {
+            let _ = disable_raw_mode();
+            let mut out = io::stdout();
+            let _ = restore_terminal_buffer(&mut out);
+        })))
+    }
+
+    fn from_cleanup(cleanup: Box<dyn FnOnce()>) -> Self {
+        Self {
+            active: true,
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn release(&mut self) {
+        if self.active {
+            self.active = false;
+            if let Some(cleanup) = self.cleanup.take() {
+                cleanup();
+            }
+        }
+    }
+}
+
+impl Drop for TuiSessionGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// Launches the headless SSH-compatible terminal workbench (`causal-atlas tui`).
 pub fn run_headless_tui(report: &CoreAnalysisReport) -> io::Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    let mut guard = TuiSessionGuard::enter()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut tab_idx: usize = 0;
@@ -269,8 +315,50 @@ pub fn run_headless_tui(report: &CoreAnalysisReport) -> io::Result<()> {
         }
     };
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    drop(terminal);
+    guard.release();
     loop_res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn tui_session_guard_restores_on_early_error_return_and_is_idempotent() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = Arc::clone(&calls);
+
+        let early_err = (|| -> io::Result<()> {
+            let _guard = TuiSessionGuard::from_cleanup(Box::new(move || {
+                calls_ref.fetch_add(1, Ordering::SeqCst);
+            }));
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated draw failure"))?;
+            Ok(())
+        })();
+        assert!(early_err.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let calls2 = Arc::new(AtomicUsize::new(0));
+        let calls2_ref = Arc::clone(&calls2);
+        {
+            let mut guard = TuiSessionGuard::from_cleanup(Box::new(move || {
+                calls2_ref.fetch_add(1, Ordering::SeqCst);
+            }));
+            guard.release();
+            assert_eq!(calls2.load(Ordering::SeqCst), 1);
+            guard.release();
+        }
+        assert_eq!(calls2.load(Ordering::SeqCst), 1);
+
+        let mut buf = Vec::new();
+        restore_terminal_buffer(&mut buf).expect("restore terminal sequences");
+        let seq = String::from_utf8_lossy(&buf);
+        assert!(seq.contains("\x1b[?1049l"));
+        assert!(seq.contains("\x1b[?25h"));
+    }
 }

@@ -20,8 +20,8 @@
 
 ## Triggering the Batch Downloader & Updates
 
-### In the Native Desktop GUI (`Tab 8: Open Data Streams & SQLite Cache` or Top Toolbar)
-- Click **`Sync & Update DB`** in the top bar (or open **Tab 8**) to trigger:
+### In the Native Desktop GUI (`Tab 5: Knowledge Databases` or Top Toolbar)
+- Click **`Sync & Update DB`** in the top bar (or open **Tab 5**) to trigger:
   - **`Batch Download All Pathways (WikiPathways GPML + Reactome GMT)`**: Auto-discovers the latest `wikipathways-*-gpml-Homo_sapiens.zip` (866+ coordinate-mapped XML diagrams) from [WikiPathways](https://data.wikipathways.org/current/gpml/) and `ReactomePathways.gmt.zip` (2,647+ human pathways) from [Reactome](https://reactome.org/ContentService), streaming live progress into SQLite.
   - **`Check & Sync Stream Updates (ETag / SHA-256)`** or **`Force Full Re-Sync`**: Updates [OmniPath](https://pypath.omnipathdb.org/webservice.html), [CollecTRI](https://github.com/saezlab/collecTRI), [SIGNOR 3.0](https://academic.oup.com/nar/article/51/D1/D631/6761728), [STRING v12](https://string-db.org/help/api/), and [Open Targets v4](https://platform-docs.opentargets.org/data-access/graphql-api) on a background worker thread with a cancellable progress bar.
   - **`Fetch Reactome 2D Diagram`** (in **Tab 2**): Pulls and caches `DiagramJS` layout coordinates on demand for any `R-HSA-*` pathway.
@@ -44,6 +44,12 @@ cargo run --release -p ca-app -- --db causal_atlas.sqlite3 download-all --force
 
 # 5. Run cached CLI Core Analysis on a DESeq2 / edgeR TSV file
 cargo run --release -p ca-app -- --db causal_atlas.sqlite3 analyze --input examples/tnf_huvec_deg.tsv --output report.json
+
+# 6. Launch the interactive headless Terminal UI (SSH / workstation compatible)
+cargo run --release -p ca-app -- --db causal_atlas.sqlite3 tui
+
+# 7. Export vector SVG Canonical Pathway MAP & Downstream TreeMap diagrams
+cargo run --release -p ca-app -- --db causal_atlas.sqlite3 export-svg --out-dir exports
 ```
 
 ## Headless Validation
@@ -59,7 +65,7 @@ Validation outputs (`causal_atlas_validation_summary.json` and `upstream_regulat
 ## Citation & CRV Science Apps Hub
 
 - **CRV Science Apps Hub**: <https://crvscience.com/apps>
-- **Preprint (`APP-PREPRINT-04`)**: [Causal-Atlas: Signed Mechanistic Network Inference, Upstream Regulator Z-Scoring, and Transcriptomic Perturbation Reversal](https://crvscience.com/apps/preprints/causal-atlas-pathway-perturbation)
+- **Preprint (`APP-PREPRINT-04`)**: [Causal-Atlas: Tracing How Genes and Drugs Turn Biological Pathways On and Off](https://crvscience.com/apps/preprints/causal-atlas-pathway-perturbation)
 - **Concept DOI**: [`10.5281/zenodo.24222376`](https://doi.org/10.5281/zenodo.24222376)
 
 ```bibtex

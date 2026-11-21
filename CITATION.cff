@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Causal Atlas in your research, please cite the software and its CRV Science Apps preprint below."
 title: "Causal Atlas"
+type: software
 version: "0.2.0"
 date-released: "2026-11-14"
 doi: "10.5281/zenodo.24222376"
@@ -39,7 +40,7 @@ preferred-citation:
   notes: "APP-PREPRINT-04"
 references:
   - type: article
-    title: "The CRV Science App Network: Seventeen Open-Source Rust Programs for Science, Data, and Simulation"
+    title: "The CRV Science App Network: Twenty Open-Source Rust Programs for Science, Data, and Simulation"
     authors:
       - family-names: "White"
         given-names: "Bryan P."

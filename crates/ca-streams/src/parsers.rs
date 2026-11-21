@@ -18,7 +18,7 @@
 use crate::{StreamError, StreamFormat};
 use ca_core::{
     CausalEdge, EdgeClass, EdgeSign, EntityKind, EntityNode, KnowledgeGraph, PathwayDef,
-    PathwayReactionEdge, PerturbationKind, PerturbationSignature, SubcellularLocation,
+    PathwayReactionEdge, PerturbationSignature, SubcellularLocation,
 };
 use std::collections::BTreeMap;
 
@@ -753,6 +753,7 @@ pub fn parse_lincs_signatures_json(raw: &str) -> Result<(KnowledgeGraph, usize),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ca_core::PerturbationKind;
 
     #[test]
     fn parses_wikipathways_gmt() {

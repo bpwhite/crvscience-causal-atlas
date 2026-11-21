@@ -469,6 +469,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stats.cached_edges,
                     stats.file_size_bytes as f64 / 1024.0
                 );
+                if !summary.errors.is_empty() {
+                    eprintln!(
+                        "[WARN] Batch sync reported {} stream error(s):",
+                        summary.errors.len()
+                    );
+                    for err in &summary.errors {
+                        eprintln!("  - {err}");
+                    }
+                }
             }
         }
         Commands::Tui { input } => {

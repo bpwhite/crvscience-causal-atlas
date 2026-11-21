@@ -227,7 +227,7 @@ pub fn draw_entity_glyph(
 /// Draws a small circular `(P)` post-translational phosphorylation badge on the top-right rim of a molecule.
 pub fn draw_phospho_badge(painter: &egui::Painter, pos: Pos2, bg: Color32, fg: Color32) {
     painter.circle_filled(pos, 6.2, bg);
-    painter.circle_stroke(pos, 6.2, Stroke::new(1.1, fg));
+    painter.circle_stroke(pos, 6.2, Stroke::new(1.1_f32, fg));
     painter.text(
         pos,
         egui::Align2::CENTER_CENTER,
@@ -249,7 +249,7 @@ pub fn draw_dna_double_helix(
     let span = (x_end - x_start).max(40.0);
     let steps = 72usize;
     let freq = std::f32::consts::PI * 5.0 / span;
-    let stroke = Stroke::new(1.15, color);
+    let stroke = Stroke::new(1.15_f32, color);
 
     let mut gx = x_start + 10.0;
     while gx < x_end - 10.0 {
@@ -273,6 +273,7 @@ pub fn draw_dna_double_helix(
 
 /// Draws a directed causal edge between `p1` and `p2` with pointed arrowhead (`Activating`),
 /// perpendicular T-bar blunt (`Inhibiting`), or small circle (`Ambiguous`).
+#[allow(dead_code)]
 pub fn draw_directed_causal_edge(
     painter: &egui::Painter,
     p1: Pos2,

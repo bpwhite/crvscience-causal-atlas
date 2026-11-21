@@ -3,11 +3,14 @@ name = "ca-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 description = "Clean-room causal pathway, upstream regulator, mechanistic network, and downstream phenotype inference engine"
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
 csv.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
