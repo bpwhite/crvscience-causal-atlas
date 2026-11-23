@@ -239,25 +239,31 @@ pub fn run_causal_networks(
                 let mut rng = SplitMix64::new(seed);
                 let mut ge_count = 0usize;
 
+                let mut fixed_overlap = 0usize;
+                let mut sampling_bins: Vec<(Vec<usize>, usize)> = Vec::new();
+                for (&bin_id, &draw_cnt) in &bins_dataset_counts {
+                    if draw_cnt == 0 {
+                        continue;
+                    }
+                    if let Some(pool) = bins_universe.get(&bin_id) {
+                        let pool_len = pool.len();
+                        if draw_cnt >= pool_len {
+                            fixed_overlap += pool.iter().filter(|&&u| is_target_mask[u]).count();
+                        } else {
+                            sampling_bins.push((pool.clone(), draw_cnt));
+                        }
+                    }
+                }
+
                 for _ in 0..perms {
-                    let mut sim_overlap = 0usize;
-                    for (&bin_id, &draw_cnt) in &bins_dataset_counts {
-                        if let Some(pool) = bins_universe.get(&bin_id) {
-                            let pool_len = pool.len();
-                            if draw_cnt >= pool_len {
-                                for &u in pool {
-                                    if is_target_mask[u] {
-                                        sim_overlap += 1;
-                                    }
-                                }
-                            } else {
-                                let mut chosen = BTreeSet::new();
-                                while chosen.len() < draw_cnt {
-                                    let idx = rng.gen_index(pool_len);
-                                    if chosen.insert(idx) && is_target_mask[pool[idx]] {
-                                        sim_overlap += 1;
-                                    }
-                                }
+                    let mut sim_overlap = fixed_overlap;
+                    for (work_pool, draw_cnt) in &mut sampling_bins {
+                        let pool_len = work_pool.len();
+                        for i in 0..*draw_cnt {
+                            let j = i + rng.gen_index(pool_len - i);
+                            work_pool.swap(i, j);
+                            if is_target_mask[work_pool[i]] {
+                                sim_overlap += 1;
                             }
                         }
                     }
@@ -336,4 +342,36 @@ pub fn run_causal_networks(
     });
 
     all_hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::builtin_cohorts;
+    use crate::seed_kb::build_seed_knowledge_graph;
+
+    #[test]
+    fn cna_partial_fisher_yates_is_deterministic_and_bounded() {
+        let kg = build_seed_knowledge_graph();
+        let ds = &builtin_cohorts()[0];
+        let cfg = CoreAnalysisConfig {
+            cna_permutations: 300,
+            ..CoreAnalysisConfig::default()
+        };
+        let active = ds.filter_active(cfg.abs_log2fc_cutoff, cfg.fdr_cutoff, &kg);
+
+        let run1 = run_causal_networks(&active, &kg, &cfg);
+        let run2 = run_causal_networks(&active, &kg, &cfg);
+        assert!(!run1.is_empty());
+        assert_eq!(run1.len(), run2.len());
+        for (a, b) in run1.iter().zip(run2.iter()) {
+            assert_eq!(a.root_regulator, b.root_regulator);
+            assert_eq!(a.max_depth_k, b.max_depth_k);
+            assert!(
+                (a.network_bias_p_value - b.network_bias_p_value).abs() < 1e-12,
+                "Partial Fisher-Yates permutation sampling must be deterministic"
+            );
+            assert!(a.network_bias_p_value >= 1.0 / 301.0 && a.network_bias_p_value <= 1.0);
+        }
+    }
 }

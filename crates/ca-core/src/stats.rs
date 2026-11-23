@@ -95,10 +95,21 @@ pub fn fishers_exact_right_tail(
 
 /// Benjamini-Hochberg step-up False Discovery Rate adjustment (`q-values`).
 pub fn benjamini_hochberg(p_values: &[f64]) -> Vec<f64> {
-    let m = p_values.len();
-    if m == 0 {
+    benjamini_hochberg_with_total(p_values, p_values.len())
+}
+
+/// Benjamini-Hochberg step-up False Discovery Rate adjustment (`q-values`) across
+/// `total_hypotheses` (`m >= p_values.len()`).
+///
+/// When non-overlapping hypotheses with `p = 1.0` are omitted prior to constructing
+/// `p_values`, passing the full tested hypothesis count `m` preserves exact multiple-testing
+/// correction without materializing trailing `1.0` entries.
+pub fn benjamini_hochberg_with_total(p_values: &[f64], total_hypotheses: usize) -> Vec<f64> {
+    let k = p_values.len();
+    if k == 0 {
         return Vec::new();
     }
+    let m = total_hypotheses.max(k);
     let mut indexed: Vec<(usize, f64)> = p_values
         .iter()
         .copied()
@@ -108,11 +119,11 @@ pub fn benjamini_hochberg(p_values: &[f64]) -> Vec<f64> {
 
     indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut q_sorted = vec![1.0; m];
+    let mut q_sorted = vec![1.0; k];
     let mut running_min = 1.0f64;
     let m_f = m as f64;
 
-    for rank_rev in (0..m).rev() {
+    for rank_rev in (0..k).rev() {
         let rank = (rank_rev + 1) as f64;
         let p = indexed[rank_rev].1;
         let raw_q = (p * m_f / rank).min(1.0);
@@ -120,22 +131,73 @@ pub fn benjamini_hochberg(p_values: &[f64]) -> Vec<f64> {
         q_sorted[rank_rev] = running_min;
     }
 
-    let mut out = vec![1.0; m];
+    let mut out = vec![1.0; k];
     for (rank_idx, &(orig_idx, _)) in indexed.iter().enumerate() {
         out[orig_idx] = q_sorted[rank_idx];
     }
     out
 }
 
-/// High-accuracy complementary error function `erfc(x)` (Abramowitz & Stegun 7.1.26).
+/// Evaluates `erfc(z)` for `z > 0` via the incomplete-gamma continued fraction
+/// `Gamma(1/2, z^2) / sqrt(pi)` using modified Lentz's method.
+fn erfc_continued_fraction(z: f64) -> f64 {
+    const TINY: f64 = 1e-300;
+    const EPS: f64 = 1e-15;
+    let x = z * z;
+    let mut b = x + 0.5;
+    let mut c = 1.0 / TINY;
+    let mut d = 1.0 / b.max(TINY);
+    let mut h = d;
+
+    for k in 1..=128 {
+        let kf = k as f64;
+        let a = -kf * (kf - 0.5);
+        b += 2.0;
+        d = a * d + b;
+        if d.abs() < TINY {
+            d = TINY;
+        }
+        c = b + a / c;
+        if c.abs() < TINY {
+            c = TINY;
+        }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() <= EPS {
+            break;
+        }
+    }
+
+    let inv_sqrt_pi = std::f64::consts::FRAC_2_SQRT_PI * 0.5;
+    (h * z * inv_sqrt_pi * (-x).exp()).clamp(0.0, 1.0)
+}
+
+/// High-accuracy complementary error function `erfc(x)`:
+/// - Uses Abramowitz & Stegun 7.1.26 rational polynomial for `|x| <= 5`.
+/// - Uses incomplete-gamma continued fraction tail (`erfc_continued_fraction`) for `|x| > 5`
+///   to retain relative precision in extreme p-value tails.
 pub fn erfc_approx(x: f64) -> f64 {
+    if !x.is_finite() {
+        return if x.is_nan() {
+            f64::NAN
+        } else if x > 0.0 {
+            0.0
+        } else {
+            2.0
+        };
+    }
     let z = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * z);
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736
-                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let r = poly * (-z * z).exp();
+    let r = if z > 5.0 {
+        erfc_continued_fraction(z)
+    } else {
+        let t = 1.0 / (1.0 + 0.3275911 * z);
+        let poly = t
+            * (0.254829592
+                + t * (-0.284496736
+                    + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+        poly * (-z * z).exp()
+    };
     if x >= 0.0 {
         r
     } else {
@@ -278,5 +340,50 @@ mod tests {
             kramer_activation_z(&[(f64::NAN, 1, 1), (f64::INFINITY, 1, -1)], f64::NAN, 0.0);
         assert_eq!(z_only_bad, 0.0);
         assert_eq!(z_corr_bad, 0.0);
+    }
+
+    #[test]
+    fn bh_fdr_with_total_accounts_for_filtered_null_hypotheses() {
+        let subset = [0.001, 0.01];
+        let mut padded = vec![0.001, 0.01];
+        padded.extend(std::iter::repeat_n(1.0, 8));
+
+        let q_total = benjamini_hochberg_with_total(&subset, 10);
+        let q_padded = benjamini_hochberg(&padded);
+        assert!((q_total[0] - q_padded[0]).abs() < 1e-12);
+        assert!((q_total[1] - q_padded[1]).abs() < 1e-12);
+        assert!((q_total[0] - 0.01).abs() < 1e-12);
+        assert!((q_total[1] - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn erfc_approx_extreme_tail_continued_fraction_precision() {
+        // Crossover behavior around |x| = 5.0 (true derivative |d/dx ln erfc(x)| ~ 2x = 10 at x=5)
+        let at_5 = erfc_approx(5.0);
+        let left = erfc_approx(4.9999);
+        let right = erfc_approx(5.0001);
+        assert!(left > at_5 && at_5 > right);
+        assert!((left - right).abs() / left < 0.05);
+
+        // Known reference values in extreme tail (|x| > 5):
+        // erfc(5.0001) = 1.535893491062367e-12
+        // erfc(6.0)    = 2.1519736712498913e-17
+        // erfc(10.0)   = 2.088487583762545e-45
+        // erfc(20.0)   = 5.395865611607901e-176
+        assert!(
+            (right - 1.535893491062367e-12).abs() / 1.535893491062367e-12 < 1e-12,
+            "right={right:e}"
+        );
+        let e6 = erfc_approx(6.0);
+        assert!((e6 - 2.1519736712498913e-17).abs() / 2.1519736712498913e-17 < 1e-12, "e6={e6:e}");
+        let e10 = erfc_approx(10.0);
+        assert!((e10 - 2.088487583762545e-45).abs() / 2.088487583762545e-45 < 1e-12, "e10={e10:e}");
+        let e20 = erfc_approx(20.0);
+        assert!(e20 > 0.0 && (e20 - 5.3958656116079005e-176).abs() / 5.3958656116079005e-176 < 1e-11, "e20={e20:e}");
+
+        // Negative extreme tail approaches 2.0 cleanly and z_to_two_sided_p stays positive & accurate
+        assert!((erfc_approx(-6.0) - (2.0 - e6)).abs() < 1e-15);
+        let p10 = z_to_two_sided_p(10.0);
+        assert!((p10 - 1.523970604832105e-23).abs() / 1.523970604832105e-23 < 1e-12, "p10={p10:e}");
     }
 }

@@ -633,6 +633,7 @@ impl SqliteKnowledgeStore {
     ) -> String {
         let mut h = Sha256::new();
         h.update(self.kg_revision().as_bytes());
+        h.update(b"|ca-core-v2|");
         h.update(dataset.name.as_bytes());
         h.update(format!("|{:.4}|{:.6}|{}|{:.4}|", cfg.abs_log2fc_cutoff, cfg.fdr_cutoff, cfg.cna_max_depth, cfg.cna_weight_cutoff).as_bytes());
         for r in &dataset.rows {

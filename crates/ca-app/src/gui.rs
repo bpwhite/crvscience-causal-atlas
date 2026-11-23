@@ -87,6 +87,136 @@ pub enum PhenotypeDrugSubTab {
     RegulatorEffectsFlow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDir {
+    Asc,
+    Desc,
+}
+
+impl SortDir {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Asc => "▲",
+            Self::Desc => "▼",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableSort<C: Copy + Eq> {
+    col: C,
+    dir: SortDir,
+}
+
+impl<C: Copy + Eq> TableSort<C> {
+    fn toggle_on(slot: &mut Option<Self>, col: C, default_dir: SortDir) {
+        if let Some(cur) = slot {
+            if cur.col == col {
+                cur.dir = cur.dir.toggle();
+            } else {
+                *cur = Self {
+                    col,
+                    dir: default_dir,
+                };
+            }
+        } else {
+            *slot = Some(Self {
+                col,
+                dir: default_dir,
+            });
+        }
+    }
+
+    fn apply(self, ord: std::cmp::Ordering) -> std::cmp::Ordering {
+        match self.dir {
+            SortDir::Asc => ord,
+            SortDir::Desc => ord.reverse(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneSortCol {
+    Symbol,
+    Log2Fc,
+    PValue,
+    Fdr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneDirectionFilter {
+    All,
+    DegsOnly,
+    UpOnly,
+    DownOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegStateFilter {
+    All,
+    Activated,
+    Inhibited,
+}
+
+impl RegStateFilter {
+    fn matches(self, state: PredictedState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Activated => state == PredictedState::Activated,
+            Self::Inhibited => state == PredictedState::Inhibited,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UraSortCol {
+    Regulator,
+    Type,
+    State,
+    ActZ,
+    BiasZ,
+    OverlapP,
+    Targets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CnaSortCol {
+    Root,
+    Depth,
+    State,
+    ActZ,
+    OverlapP,
+    NetBiasP,
+}
+
+const CUTOFF_PRESETS: [(&str, f64, f64, &str); 3] = [
+    (
+        "Stringent",
+        1.5,
+        0.01,
+        "Stringent (|log2FC| >= 1.50, FDR <= 0.01): High-specificity core drivers with minimal false positives.",
+    ),
+    (
+        "Standard",
+        1.0,
+        0.05,
+        "Standard (|log2FC| >= 1.00, FDR <= 0.05): Balanced 2-fold expression and 5% BH-FDR default.",
+    ),
+    (
+        "Exploratory",
+        0.5,
+        0.10,
+        "Exploratory (|log2FC| >= 0.50, FDR <= 0.10): High-sensitivity sweep for subtle transcriptional cascades.",
+    ),
+];
+
 enum WorkerMessage {
     BatchProgress(BatchProgressEvent),
     BatchFinished(BatchSyncSummary),
@@ -112,6 +242,9 @@ enum GuiAction {
     ExportJsonReportDialog,
     ExportPathwaySvgDialog,
     ExportTreeMapSvgDialog,
+    ExportGenesCsvDialog,
+    ExportUraCsvDialog,
+    ExportCnaCsvDialog,
     SaveSnapshotDialog,
     LoadSnapshotDialog,
     ImportStreamFileDialog,
@@ -134,6 +267,7 @@ enum GuiAction {
     TogglePalette,
     TogglePathwayFullscreen,
     ToggleSidebarHidden,
+    TogglePathwayMinimap,
     FitPathwayViewport,
     CenterSelectedPathwayNode,
     RelayoutActivePathway,
@@ -177,8 +311,15 @@ pub struct CausalAtlasApp {
     highlight_pulse_timer: f32,
 
     gene_search: String,
+    gene_dir_filter: GeneDirectionFilter,
+    gene_sort: Option<TableSort<GeneSortCol>>,
     pathway_search: String,
     regulator_search: String,
+    ura_state_filter: RegStateFilter,
+    ura_sort: Option<TableSort<UraSortCol>>,
+    cna_search: String,
+    cna_state_filter: RegStateFilter,
+    cna_sort: Option<TableSort<CnaSortCol>>,
     selected_pathway_idx: usize,
     override_pathway_id: Option<String>,
     selected_pathway_node: Option<String>,
@@ -203,6 +344,7 @@ pub struct CausalAtlasApp {
     comparison_metric: ComparisonMetric,
     pathway_fullscreen: bool,
     sidebar_hidden: bool,
+    pathway_minimap_visible: bool,
     pathway_zoom: f32,
     pathway_pan: Vec2,
     pathway_fit_pending: bool,
@@ -310,8 +452,15 @@ impl CausalAtlasApp {
             highlight_pulse_gene: None,
             highlight_pulse_timer: 0.0,
             gene_search: String::new(),
+            gene_dir_filter: GeneDirectionFilter::All,
+            gene_sort: None,
             pathway_search: String::new(),
             regulator_search: String::new(),
+            ura_state_filter: RegStateFilter::All,
+            ura_sort: None,
+            cna_search: String::new(),
+            cna_state_filter: RegStateFilter::All,
+            cna_sort: None,
             selected_pathway_idx: 0,
             override_pathway_id: None,
             selected_pathway_node: None,
@@ -336,6 +485,7 @@ impl CausalAtlasApp {
             comparison_metric: ComparisonMetric::UpstreamRegulatorsZ,
             pathway_fullscreen: false,
             sidebar_hidden: false,
+            pathway_minimap_visible: true,
             pathway_zoom: 1.0,
             pathway_pan: Vec2::ZERO,
             pathway_fit_pending: true,
@@ -800,6 +950,29 @@ impl CausalAtlasApp {
                     }
                 }
             }
+            GuiAction::ExportGenesCsvDialog => {
+                let csv_text = self.export_genes_csv_string();
+                let ds_name = sanitize_filename_stem(&self.cohorts[self.active_cohort_idx].name);
+                self.save_csv_dialog(&format!("{ds_name}_genes.csv"), &csv_text, "Measured Genes");
+            }
+            GuiAction::ExportUraCsvDialog => {
+                let csv_text = self.export_ura_csv_string();
+                let ds_name = sanitize_filename_stem(&self.cohorts[self.active_cohort_idx].name);
+                self.save_csv_dialog(
+                    &format!("{ds_name}_upstream_regulators.csv"),
+                    &csv_text,
+                    "Upstream Regulators",
+                );
+            }
+            GuiAction::ExportCnaCsvDialog => {
+                let csv_text = self.export_cna_csv_string();
+                let ds_name = sanitize_filename_stem(&self.cohorts[self.active_cohort_idx].name);
+                self.save_csv_dialog(
+                    &format!("{ds_name}_causal_networks.csv"),
+                    &csv_text,
+                    "Causal Networks",
+                );
+            }
             GuiAction::SaveSnapshotDialog => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Compressed Knowledge Bundle", &["gz", "json"])
@@ -908,8 +1081,12 @@ impl CausalAtlasApp {
                 }
             }
             GuiAction::ClearAllClamps => {
+                let had_clamps = !self.map_user_clamps.is_empty();
                 self.map_user_clamps.clear();
                 self.active_drug_rescue_name = None;
+                if had_clamps {
+                    self.status_banner = "Cleared all MAP node clamps".to_string();
+                }
             }
             GuiAction::SelectUraIndex(idx) => {
                 self.selected_ura_idx = idx;
@@ -937,10 +1114,14 @@ impl CausalAtlasApp {
             GuiAction::ToggleSidebarHidden => {
                 self.sidebar_hidden = !self.sidebar_hidden;
             }
+            GuiAction::TogglePathwayMinimap => {
+                self.pathway_minimap_visible = !self.pathway_minimap_visible;
+            }
             GuiAction::FitPathwayViewport => {
                 self.pathway_fit_pending = true;
                 self.camera_anim_progress = 1.0;
                 self.camera_pan_pending_node = None;
+                ctx.request_repaint();
             }
             GuiAction::CenterSelectedPathwayNode => {
                 let target = self
@@ -1240,34 +1421,7 @@ impl CausalAtlasApp {
         let mut actions: Vec<GuiAction> = Vec::new();
         let wants_kb = ctx.wants_keyboard_input();
 
-        // Global shortcuts: Ctrl/Cmd+F (Omnibox), F1 (About), layered Escape, Ctrl/Cmd+O/S
-        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F)) {
-            self.omnibox_focus_requested = true;
-            self.omnibox_dropdown_open = true;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
-            self.about_open = !self.about_open;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.omnibox_dropdown_open {
-                self.omnibox_dropdown_open = false;
-            } else if self.about_open {
-                self.about_open = false;
-            } else if self.pathway_fullscreen {
-                self.pathway_fullscreen = false;
-                self.pathway_fit_pending = true;
-            }
-        }
-        if !wants_kb
-            && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::O))
-        {
-            actions.push(GuiAction::ImportDatasetDialog);
-        }
-        if !wants_kb
-            && ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::S))
-        {
-            actions.push(GuiAction::ExportJsonReportDialog);
-        }
+        self.process_keyboard_shortcuts(ctx, wants_kb, &mut actions);
 
         egui::TopBottomPanel::top("top_nav").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -1381,6 +1535,21 @@ impl CausalAtlasApp {
                     ui.separator();
                     ui.label(RichText::new("Differential Cutoffs").strong());
                     let mut cutoff_changed = false;
+                    ui.horizontal_wrapped(|ui| {
+                        for &(name, fc_p, fdr_p, tooltip) in &CUTOFF_PRESETS {
+                            let is_active = (self.config.abs_log2fc_cutoff - fc_p).abs() < 1e-4
+                                && (self.config.fdr_cutoff - fdr_p).abs() < 1e-6;
+                            if ui
+                                .selectable_label(is_active, name)
+                                .on_hover_text(tooltip)
+                                .clicked()
+                            {
+                                self.config.abs_log2fc_cutoff = fc_p;
+                                self.config.fdr_cutoff = fdr_p;
+                                cutoff_changed = true;
+                            }
+                        }
+                    });
                     cutoff_changed |= ui
                         .add(
                             egui::Slider::new(&mut self.config.abs_log2fc_cutoff, 0.25..=3.0)
@@ -1480,7 +1649,7 @@ impl CausalAtlasApp {
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
             WorkbenchTab::CohortVolcano => {
-                self.render_dataset_volcano_tab(ui, &pal);
+                self.render_dataset_volcano_tab(ui, &pal, &mut actions);
             }
             WorkbenchTab::PathwayAtlas => {
                 self.render_canonical_map_tab(ui, &pal, &mut actions);
@@ -1904,24 +2073,27 @@ impl CausalAtlasApp {
 }
 
 impl CausalAtlasApp {
-    fn render_dataset_volcano_tab(&mut self, ui: &mut Ui, pal: &ScientificPalette) {
-        let Self {
-            cohorts,
-            active_cohort_idx,
-            config,
-            gene_search,
-            ..
-        } = self;
-
-        let ds = &cohorts[*active_cohort_idx];
-        let fc_cut = config.abs_log2fc_cutoff;
-        let q_cut = config.fdr_cutoff;
+    fn render_dataset_volcano_tab(
+        &mut self,
+        ui: &mut Ui,
+        pal: &ScientificPalette,
+        actions: &mut Vec<GuiAction>,
+    ) {
+        let fc_cut = self.config.abs_log2fc_cutoff;
+        let q_cut = self.config.fdr_cutoff;
+        let selected_gene = self.omnibox_selected_gene.clone();
+        let filtered_genes: Vec<ca_core::GeneMeasurement> = self
+            .filtered_sorted_genes()
+            .into_iter()
+            .cloned()
+            .collect();
 
         ui.columns(2, |cols| {
+            let ds = &self.cohorts[self.active_cohort_idx];
             cols[0].heading("Interactive Volcano Plot (log2FC vs. -log10 FDR)");
             let avail = cols[0].available_size();
             let plot_size = Vec2::new(avail.x.max(280.0), (avail.y - 32.0).max(280.0));
-            let (resp, painter) = cols[0].allocate_painter(plot_size, Sense::hover());
+            let (resp, painter) = cols[0].allocate_painter(plot_size, Sense::click());
             let rect = resp.rect;
             painter.rect_filled(rect, 6.0, pal.bg_canvas);
             painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.grid_line));
@@ -1931,18 +2103,21 @@ impl CausalAtlasApp {
                 .iter()
                 .map(|r| r.log2_fc.abs())
                 .fold(3.5f64, f64::max)
-                * 1.1;
+                * 1.12;
             let max_y = ds
                 .rows
                 .iter()
                 .map(|r| -r.fdr.max(1e-25).log10())
                 .fold(6.0f64, f64::max)
-                * 1.08;
+                * 1.10;
 
-            let pad = 36.0f32;
+            let pad_left = 54.0f32;
+            let pad_right = 20.0f32;
+            let pad_top = 24.0f32;
+            let pad_bottom = 44.0f32;
             let inner = Rect::from_min_max(
-                Pos2::new(rect.left() + pad, rect.top() + 18.0),
-                Pos2::new(rect.right() - 18.0, rect.bottom() - pad),
+                Pos2::new(rect.left() + pad_left, rect.top() + pad_top),
+                Pos2::new(rect.right() - pad_right, rect.bottom() - pad_bottom),
             );
 
             let map_pt = |fc: f64, neg_log_q: f64| -> Pos2 {
@@ -1954,25 +2129,153 @@ impl CausalAtlasApp {
                 )
             };
 
+            // Numeric X/Y ticks & gridlines
+            let grid_stroke = Stroke::new(0.8_f32, pal.grid_line);
+            let axis_stroke = Stroke::new(1.3_f32, pal.border_default);
+
+            let x_ticks = compute_nice_ticks(-max_x, max_x, 7);
+            for &xt in &x_ticks {
+                let sx = map_pt(xt, 0.0).x;
+                if sx >= inner.left() - 1.0 && sx <= inner.right() + 1.0 {
+                    painter.line_segment(
+                        [Pos2::new(sx, inner.top()), Pos2::new(sx, inner.bottom())],
+                        if xt.abs() < 1e-6 {
+                            Stroke::new(1.0_f32, pal.border_default)
+                        } else {
+                            grid_stroke
+                        },
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(sx, inner.bottom()),
+                            Pos2::new(sx, inner.bottom() + 4.0),
+                        ],
+                        axis_stroke,
+                    );
+                    let lbl = if xt.abs() < 1e-6 {
+                        "0".to_string()
+                    } else if (xt - xt.round()).abs() < 1e-6 {
+                        format!("{xt:+.0}")
+                    } else {
+                        format!("{xt:+.1}")
+                    };
+                    painter.text(
+                        Pos2::new(sx, inner.bottom() + 6.0),
+                        Align2::CENTER_TOP,
+                        lbl,
+                        FontId::proportional(10.0),
+                        pal.text_muted,
+                    );
+                }
+            }
+
+            let y_ticks = compute_nice_ticks(0.0, max_y, 6);
+            for &yt in &y_ticks {
+                if yt < -1e-6 {
+                    continue;
+                }
+                let sy = map_pt(0.0, yt).y;
+                if sy >= inner.top() - 1.0 && sy <= inner.bottom() + 1.0 {
+                    painter.line_segment(
+                        [Pos2::new(inner.left(), sy), Pos2::new(inner.right(), sy)],
+                        grid_stroke,
+                    );
+                    painter.line_segment(
+                        [Pos2::new(inner.left() - 4.0, sy), Pos2::new(inner.left(), sy)],
+                        axis_stroke,
+                    );
+                    let lbl = if (yt - yt.round()).abs() < 1e-6 {
+                        format!("{yt:.0}")
+                    } else {
+                        format!("{yt:.1}")
+                    };
+                    painter.text(
+                        Pos2::new(inner.left() - 7.0, sy),
+                        Align2::RIGHT_CENTER,
+                        lbl,
+                        FontId::proportional(10.0),
+                        pal.text_muted,
+                    );
+                }
+            }
+
+            // Axis spines & titles
+            painter.line_segment(
+                [inner.left_top(), inner.left_bottom()],
+                axis_stroke,
+            );
+            painter.line_segment(
+                [inner.left_bottom(), inner.right_bottom()],
+                axis_stroke,
+            );
+            painter.text(
+                Pos2::new(inner.center().x, rect.bottom() - 6.0),
+                Align2::CENTER_BOTTOM,
+                "log2 Fold Change (log2FC)",
+                FontId::proportional(11.0),
+                pal.text_primary,
+            );
+            painter.text(
+                Pos2::new(rect.left() + 10.0, rect.top() + 6.0),
+                Align2::LEFT_TOP,
+                "-log10(BH-FDR)",
+                FontId::proportional(11.0),
+                pal.text_primary,
+            );
+
+            // Cutoff guide lines & value labels
             let x_pos = map_pt(fc_cut, 0.0).x;
             let x_neg = map_pt(-fc_cut, 0.0).x;
             let y_q = map_pt(0.0, -q_cut.max(1e-25).log10()).y;
-            let guide_stroke = Stroke::new(1.0_f32, pal.grid_line);
+            let cut_stroke = Stroke::new(1.2_f32, pal.inconsistent_amber);
             painter.line_segment(
                 [Pos2::new(x_pos, inner.top()), Pos2::new(x_pos, inner.bottom())],
-                guide_stroke,
+                cut_stroke,
             );
             painter.line_segment(
                 [Pos2::new(x_neg, inner.top()), Pos2::new(x_neg, inner.bottom())],
-                guide_stroke,
+                cut_stroke,
             );
             painter.line_segment(
                 [Pos2::new(inner.left(), y_q), Pos2::new(inner.right(), y_q)],
-                guide_stroke,
+                cut_stroke,
+            );
+            painter.text(
+                Pos2::new(x_pos + 3.0, inner.top() + 2.0),
+                Align2::LEFT_TOP,
+                format!("+{fc_cut:.2}"),
+                FontId::proportional(9.5),
+                pal.inconsistent_amber,
+            );
+            painter.text(
+                Pos2::new(x_neg - 3.0, inner.top() + 2.0),
+                Align2::RIGHT_TOP,
+                format!("-{fc_cut:.2}"),
+                FontId::proportional(9.5),
+                pal.inconsistent_amber,
+            );
+            let fdr_lbl = if q_cut < 0.001 {
+                format!("FDR ≤ {q_cut:.1e}")
+            } else {
+                format!("FDR ≤ {q_cut:.3}")
+            };
+            painter.text(
+                Pos2::new(inner.right() - 4.0, (y_q - 3.0).max(inner.top() + 12.0)),
+                Align2::RIGHT_BOTTOM,
+                fdr_lbl,
+                FontId::proportional(9.5),
+                pal.inconsistent_amber,
             );
 
             let hover_pos = resp.hover_pos();
-            let mut hovered_gene: Option<(&str, f64, f64)> = None;
+            let click_pos = if resp.clicked() {
+                resp.interact_pointer_pos()
+            } else {
+                None
+            };
+            let mut nearest_hover: Option<(f32, &str, f64, f64)> = None;
+            let mut nearest_click: Option<(f32, &str)> = None;
+            let mut label_candidates: Vec<(f64, Pos2, &str)> = Vec::new();
 
             for row in &ds.rows {
                 let yv = -row.fdr.max(1e-25).log10();
@@ -1985,34 +2288,143 @@ impl CausalAtlasApp {
                 } else {
                     pal.expr_down
                 };
-                let rad = if active { 4.8 } else { 3.0 };
-                painter.circle_filled(pt, rad, col);
-                if active && yv > max_y * 0.35 {
-                    painter.text(
-                        Pos2::new(pt.x, pt.y - 9.0),
-                        Align2::CENTER_BOTTOM,
-                        &row.symbol,
-                        FontId::proportional(10.5),
-                        pal.text_primary,
+                let is_sel = selected_gene.as_deref() == Some(row.symbol.as_str());
+                let rad = if is_sel {
+                    6.0
+                } else if active {
+                    4.8
+                } else {
+                    3.0
+                };
+                if is_sel {
+                    painter.circle_stroke(
+                        pt,
+                        rad + 3.0,
+                        Stroke::new(2.0_f32, Color32::from_rgb(250, 204, 21)),
                     );
                 }
+                painter.circle_filled(pt, rad, col);
+                if active && (yv > max_y * 0.28 || is_sel) {
+                    label_candidates.push((yv + row.log2_fc.abs() * 0.1, pt, row.symbol.as_str()));
+                }
                 if let Some(hp) = hover_pos {
-                    if hp.distance(pt) <= 8.0 {
-                        hovered_gene = Some((&row.symbol, row.log2_fc, row.fdr));
+                    let d = hp.distance(pt);
+                    if d <= 10.0 && nearest_hover.is_none_or(|(bd, ..)| d < bd) {
+                        nearest_hover = Some((d, row.symbol.as_str(), row.log2_fc, row.fdr));
+                    }
+                }
+                if let Some(cp) = click_pos {
+                    let d = cp.distance(pt);
+                    if d <= 10.0 && nearest_click.is_none_or(|(bd, _)| d < bd) {
+                        nearest_click = Some((d, row.symbol.as_str()));
                     }
                 }
             }
 
-            if let Some((sym, fc, q)) = hovered_gene {
-                resp.on_hover_text(format!("{sym}\nlog2FC: {fc:+.3}\nFDR: {q:.2e}"));
+            // Collision-avoidant DEG label placement sorted by significance priority
+            label_candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let mut placed_rects: Vec<Rect> = Vec::new();
+            let candidate_offsets = [
+                (Vec2::new(0.0, -9.0), Align2::CENTER_BOTTOM),
+                (Vec2::new(7.0, -7.0), Align2::LEFT_BOTTOM),
+                (Vec2::new(-7.0, -7.0), Align2::RIGHT_BOTTOM),
+                (Vec2::new(0.0, 9.0), Align2::CENTER_TOP),
+                (Vec2::new(8.0, 0.0), Align2::LEFT_CENTER),
+                (Vec2::new(-8.0, 0.0), Align2::RIGHT_CENTER),
+            ];
+            for (_score, pt, sym) in label_candidates {
+                let est_w = (sym.chars().count() as f32) * 6.4 + 6.0;
+                let est_h = 13.0f32;
+                for &(off, align) in &candidate_offsets {
+                    let anchor = pt + off;
+                    let r = match align {
+                        Align2::CENTER_BOTTOM => Rect::from_min_size(
+                            Pos2::new(anchor.x - est_w * 0.5, anchor.y - est_h),
+                            Vec2::new(est_w, est_h),
+                        ),
+                        Align2::LEFT_BOTTOM => Rect::from_min_size(
+                            Pos2::new(anchor.x, anchor.y - est_h),
+                            Vec2::new(est_w, est_h),
+                        ),
+                        Align2::RIGHT_BOTTOM => Rect::from_min_size(
+                            Pos2::new(anchor.x - est_w, anchor.y - est_h),
+                            Vec2::new(est_w, est_h),
+                        ),
+                        Align2::CENTER_TOP => Rect::from_min_size(
+                            Pos2::new(anchor.x - est_w * 0.5, anchor.y),
+                            Vec2::new(est_w, est_h),
+                        ),
+                        Align2::LEFT_CENTER => Rect::from_min_size(
+                            Pos2::new(anchor.x, anchor.y - est_h * 0.5),
+                            Vec2::new(est_w, est_h),
+                        ),
+                        _ => Rect::from_min_size(
+                            Pos2::new(anchor.x - est_w, anchor.y - est_h * 0.5),
+                            Vec2::new(est_w, est_h),
+                        ),
+                    };
+                    let in_bounds = r.left() >= inner.left() + 2.0
+                        && r.right() <= inner.right() - 2.0
+                        && r.top() >= inner.top() + 2.0
+                        && r.bottom() <= inner.bottom() - 2.0;
+                    if in_bounds && !placed_rects.iter().any(|prev| prev.intersects(r)) {
+                        painter.text(
+                            anchor,
+                            align,
+                            sym,
+                            FontId::proportional(10.0),
+                            pal.text_primary,
+                        );
+                        placed_rects.push(r);
+                        break;
+                    }
+                }
             }
 
-            cols[1].heading("Measured Gene Table");
-            cols[1].horizontal(|ui| {
-                ui.label("Filter symbol:");
-                ui.text_edit_singleline(gene_search);
+            if let Some((_, sym)) = nearest_click {
+                actions.push(GuiAction::JumpToGene {
+                    symbol: sym.to_string(),
+                    pathway_id: None,
+                });
+            }
+            if let Some((_, sym, fc, q)) = nearest_hover {
+                resp.on_hover_text(format!(
+                    "{sym}\nlog2FC: {fc:+.3}\nFDR: {q:.2e}\nClick point to focus in Omnibox & Pathway Atlas"
+                ));
+            }
+
+            cols[1].horizontal_wrapped(|ui| {
+                ui.heading("Measured Gene Table");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Export CSV").clicked() {
+                        actions.push(GuiAction::ExportGenesCsvDialog);
+                    }
+                });
             });
-            let needle = gene_search.trim().to_uppercase();
+            cols[1].horizontal_wrapped(|ui| {
+                ui.label("Filter:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.gene_search)
+                        .hint_text("Symbol...")
+                        .desired_width(120.0),
+                );
+                if !self.gene_search.is_empty() && ui.small_button("✕").clicked() {
+                    self.gene_search.clear();
+                }
+                for (filt, lbl) in [
+                    (GeneDirectionFilter::All, "All"),
+                    (GeneDirectionFilter::DegsOnly, "DEGs"),
+                    (GeneDirectionFilter::UpOnly, "Up (+)"),
+                    (GeneDirectionFilter::DownOnly, "Down (-)"),
+                ] {
+                    if ui
+                        .selectable_label(self.gene_dir_filter == filt, lbl)
+                        .clicked()
+                    {
+                        self.gene_dir_filter = filt;
+                    }
+                }
+            });
             cols[1].push_id("dataset_gene_scroll", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("gene_table_grid")
@@ -2020,17 +2432,37 @@ impl CausalAtlasApp {
                         .num_columns(4)
                         .spacing([14.0, 5.0])
                         .show(ui, |ui| {
-                            ui.strong("Symbol");
-                            ui.strong("log2FC");
-                            ui.strong("P-value");
-                            ui.strong("BH-FDR");
+                            render_sort_header(
+                                ui,
+                                "Symbol",
+                                GeneSortCol::Symbol,
+                                SortDir::Asc,
+                                &mut self.gene_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "log2FC",
+                                GeneSortCol::Log2Fc,
+                                SortDir::Desc,
+                                &mut self.gene_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "P-value",
+                                GeneSortCol::PValue,
+                                SortDir::Asc,
+                                &mut self.gene_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "BH-FDR",
+                                GeneSortCol::Fdr,
+                                SortDir::Asc,
+                                &mut self.gene_sort,
+                            );
                             ui.end_row();
 
-                            for r in ds
-                                .rows
-                                .iter()
-                                .filter(|r| needle.is_empty() || r.symbol.contains(&needle))
-                            {
+                            for r in &filtered_genes {
                                 let pass = r.log2_fc.abs() >= fc_cut && r.fdr <= q_cut;
                                 let c = if !pass {
                                     pal.text_muted
@@ -2039,7 +2471,17 @@ impl CausalAtlasApp {
                                 } else {
                                     pal.expr_down
                                 };
-                                ui.colored_label(c, &r.symbol);
+                                let is_sel = selected_gene.as_deref() == Some(r.symbol.as_str());
+                                if ui
+                                    .selectable_label(is_sel, RichText::new(&r.symbol).color(c))
+                                    .on_hover_text("Focus gene in Omnibox & Pathway Atlas")
+                                    .clicked()
+                                {
+                                    actions.push(GuiAction::JumpToGene {
+                                        symbol: r.symbol.clone(),
+                                        pathway_id: None,
+                                    });
+                                }
                                 ui.colored_label(c, format!("{:+.3}", r.log2_fc));
                                 ui.label(format!("{:.2e}", r.p_value));
                                 ui.label(format!("{:.2e}", r.fdr));
@@ -2265,7 +2707,11 @@ impl CausalAtlasApp {
                         .size(11.5)
                         .color(pal.text_muted),
                     );
-                    if ui.button("Fit All").clicked() {
+                    if ui
+                        .button("Fit All")
+                        .on_hover_text("Fit entire pathway diagram to viewport (Shortcut: F or 0)")
+                        .clicked()
+                    {
                         actions.push(GuiAction::FitPathwayViewport);
                     }
                     if ui.button("Center Selected").clicked() {
@@ -2288,6 +2734,14 @@ impl CausalAtlasApp {
                     if ui.button(sb_lbl).clicked() {
                         actions.push(GuiAction::ToggleSidebarHidden);
                     }
+                    let mm_lbl = if self.pathway_minimap_visible {
+                        "Hide Mini-Map"
+                    } else {
+                        "Show Mini-Map"
+                    };
+                    if ui.button(mm_lbl).clicked() {
+                        actions.push(GuiAction::TogglePathwayMinimap);
+                    }
                     let fs_lbl = if is_full {
                         "Exit Full Screen"
                     } else {
@@ -2296,7 +2750,11 @@ impl CausalAtlasApp {
                     if ui.button(fs_lbl).clicked() {
                         actions.push(GuiAction::TogglePathwayFullscreen);
                     }
-                    if ui.button("Export SVG").clicked() {
+                    if ui
+                        .button("Export SVG")
+                        .on_hover_text("Export vector MAP diagram to SVG (Shortcut: Ctrl+E)")
+                        .clicked()
+                    {
                         actions.push(GuiAction::ExportPathwaySvgDialog);
                     }
                     if pinned_count > 0
@@ -2309,7 +2767,12 @@ impl CausalAtlasApp {
                             actions.push(GuiAction::FetchReactomeDiagram(pw_def.id.clone()));
                         }
                     }
-                    if !self.map_user_clamps.is_empty() && ui.button("Reset MAP Clamps").clicked() {
+                    if !self.map_user_clamps.is_empty()
+                        && ui
+                            .button("Reset MAP Clamps")
+                            .on_hover_text("Clear all user & drug-rescue MAP clamps (Shortcut: R)")
+                            .clicked()
+                    {
                         actions.push(GuiAction::ClearAllClamps);
                     }
                 });
@@ -2603,6 +3066,14 @@ impl CausalAtlasApp {
                     Pos2::new(rect.right() - 168.0, rect.bottom() - 140.0),
                     Vec2::new(156.0, 128.0),
                 );
+                let minimap_close_rect = Rect::from_min_size(
+                    Pos2::new(minimap_rect.right() - 18.0, minimap_rect.top() + 1.0),
+                    Vec2::new(16.0, minimap_header_h - 2.0),
+                );
+                let minimap_restore_rect = Rect::from_min_size(
+                    Pos2::new(rect.right() - 104.0, rect.bottom() - 32.0),
+                    Vec2::new(92.0, 22.0),
+                );
                 let minimap_inner = Rect::from_min_max(
                     Pos2::new(minimap_rect.left() + 6.0, minimap_rect.top() + minimap_header_h + 4.0),
                     Pos2::new(minimap_rect.right() - 6.0, minimap_rect.bottom() - 6.0),
@@ -2628,7 +3099,13 @@ impl CausalAtlasApp {
                     )
                 };
 
-                let pointer_in_minimap = pointer_pos.is_some_and(|pp| minimap_rect.contains(pp));
+                let pointer_in_minimap_close =
+                    self.pathway_minimap_visible && pointer_pos.is_some_and(|pp| minimap_close_rect.contains(pp));
+                let pointer_in_minimap_restore =
+                    !self.pathway_minimap_visible && pointer_pos.is_some_and(|pp| minimap_restore_rect.contains(pp));
+                let pointer_in_minimap = (self.pathway_minimap_visible
+                    && pointer_pos.is_some_and(|pp| minimap_rect.contains(pp)))
+                    || pointer_in_minimap_restore;
 
                 if resp.drag_started() && !pointer_in_minimap {
                     self.camera_anim_progress = 1.0;
@@ -2694,7 +3171,9 @@ impl CausalAtlasApp {
                 }
 
                 if resp.clicked() && pointer_in_minimap {
-                    if let Some(pp) = resp.interact_pointer_pos() {
+                    if pointer_in_minimap_close || pointer_in_minimap_restore {
+                        actions.push(GuiAction::TogglePathwayMinimap);
+                    } else if let Some(pp) = resp.interact_pointer_pos() {
                         let u = ((pp.x - minimap_inner.left()) / minimap_inner.width().max(1.0))
                             .clamp(0.0, 1.0);
                         let v = ((pp.y - minimap_inner.top()) / minimap_inner.height().max(1.0))
@@ -2718,20 +3197,29 @@ impl CausalAtlasApp {
                     )
                 };
 
-                // 1. 5-Compartment Subcellular Architectural Bands in Virtual World Space
+                // 1. Subtle 5-Compartment Subcellular Architectural Band Fills & Dividers
                 let pm_l = to_screen(24.0, wl.bands.plasma_membrane_y);
                 let pm_r = to_screen(wl.world_w - 24.0, wl.bands.plasma_membrane_y);
+                let org_l = to_screen(48.0, wl.bands.organelle_divider_y);
+                let org_r = to_screen(wl.world_w - 48.0, wl.bands.organelle_divider_y);
+                let nm_l = to_screen(52.0, wl.bands.nuclear_envelope_y);
+                let nm_r = to_screen(wl.world_w - 52.0, wl.bands.nuclear_envelope_y);
+
+                draw_pathway_compartment_bands(
+                    &painter,
+                    rect,
+                    pm_l.y,
+                    org_l.y,
+                    nm_l.y,
+                    zoom,
+                    self.palette_mode,
+                );
+
                 painter.line_segment(
                     [pm_l, pm_r],
                     Stroke::new((6.0 * zoom).clamp(2.0, 8.0), pal.border_default),
                 );
-
-                let org_l = to_screen(48.0, wl.bands.organelle_divider_y);
-                let org_r = to_screen(wl.world_w - 48.0, wl.bands.organelle_divider_y);
                 painter.line_segment([org_l, org_r], Stroke::new(1.2_f32, pal.grid_line));
-
-                let nm_l = to_screen(52.0, wl.bands.nuclear_envelope_y);
-                let nm_r = to_screen(wl.world_w - 52.0, wl.bands.nuclear_envelope_y);
                 painter.line_segment(
                     [nm_l, nm_r],
                     Stroke::new((5.5 * zoom).clamp(2.0, 7.5), pal.border_default),
@@ -2743,6 +3231,13 @@ impl CausalAtlasApp {
                     Align2::LEFT_TOP,
                     SubcellularLocation::Extracellular.label(),
                     FontId::proportional(label_sz),
+                    pal.text_muted,
+                );
+                painter.text(
+                    Pos2::new(pm_l.x.max(rect.left() + 12.0), pm_l.y - 6.0 * zoom - 2.0),
+                    Align2::LEFT_BOTTOM,
+                    SubcellularLocation::PlasmaMembrane.label(),
+                    FontId::proportional((label_sz * 0.88).max(8.5)),
                     pal.text_muted,
                 );
                 painter.text(
@@ -2996,122 +3491,163 @@ impl CausalAtlasApp {
                     }
                 }
 
-                // 5. Bottom-right Mini-Map with dedicated header strip & live viewport box
-                painter.rect_filled(
-                    minimap_rect,
-                    5.0,
-                    Color32::from_rgba_unmultiplied(12, 16, 24, 224),
-                );
-                let mm_header_rect = Rect::from_min_max(
-                    minimap_rect.min,
-                    Pos2::new(minimap_rect.right(), minimap_rect.top() + minimap_header_h),
-                );
-                painter.rect_filled(
-                    mm_header_rect,
-                    egui::Rounding {
-                        nw: 5.0,
-                        ne: 5.0,
-                        sw: 0.0,
-                        se: 0.0,
-                    },
-                    Color32::from_rgba_unmultiplied(24, 31, 44, 238),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(minimap_rect.left(), minimap_rect.top() + minimap_header_h),
+                // 5. Bottom-left Edge-Sign Legend
+                draw_pathway_edge_legend(&painter, rect, pal, self.palette_mode);
+
+                // 6. Toggleable Bottom-right Mini-Map with header hide button & live viewport box
+                if self.pathway_minimap_visible {
+                    painter.rect_filled(
+                        minimap_rect,
+                        5.0,
+                        Color32::from_rgba_unmultiplied(12, 16, 24, 224),
+                    );
+                    let mm_header_rect = Rect::from_min_max(
+                        minimap_rect.min,
                         Pos2::new(minimap_rect.right(), minimap_rect.top() + minimap_header_h),
-                    ],
-                    Stroke::new(1.0_f32, pal.grid_line),
-                );
-                painter.rect_stroke(minimap_rect, 5.0, Stroke::new(1.2_f32, pal.border_default));
+                    );
+                    painter.rect_filled(
+                        mm_header_rect,
+                        egui::Rounding {
+                            nw: 5.0,
+                            ne: 5.0,
+                            sw: 0.0,
+                            se: 0.0,
+                        },
+                        Color32::from_rgba_unmultiplied(24, 31, 44, 238),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(minimap_rect.left(), minimap_rect.top() + minimap_header_h),
+                            Pos2::new(minimap_rect.right(), minimap_rect.top() + minimap_header_h),
+                        ],
+                        Stroke::new(1.0_f32, pal.grid_line),
+                    );
+                    painter.rect_stroke(minimap_rect, 5.0, Stroke::new(1.2_f32, pal.border_default));
 
-                let map_to_mini = |wx: f32, wy: f32| -> Pos2 {
-                    Pos2::new(
-                        minimap_inner.left()
-                            + (wx / wl.world_w.max(1.0)).clamp(0.0, 1.0) * minimap_inner.width(),
-                        minimap_inner.top()
-                            + (wy / wl.world_h.max(1.0)).clamp(0.0, 1.0) * minimap_inner.height(),
-                    )
-                };
+                    let map_to_mini = |wx: f32, wy: f32| -> Pos2 {
+                        Pos2::new(
+                            minimap_inner.left()
+                                + (wx / wl.world_w.max(1.0)).clamp(0.0, 1.0)
+                                    * minimap_inner.width(),
+                            minimap_inner.top()
+                                + (wy / wl.world_h.max(1.0)).clamp(0.0, 1.0)
+                                    * minimap_inner.height(),
+                        )
+                    };
 
-                let mm_pm_y = map_to_mini(0.0, wl.bands.plasma_membrane_y).y;
-                let mm_nm_y = map_to_mini(0.0, wl.bands.nuclear_envelope_y).y;
-                painter.line_segment(
-                    [
-                        Pos2::new(minimap_inner.left(), mm_pm_y),
-                        Pos2::new(minimap_inner.right(), mm_pm_y),
-                    ],
-                    Stroke::new(0.8_f32, pal.grid_line),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(minimap_inner.left(), mm_nm_y),
-                        Pos2::new(minimap_inner.right(), mm_nm_y),
-                    ],
-                    Stroke::new(0.8_f32, pal.grid_line),
-                );
+                    let mm_pm_y = map_to_mini(0.0, wl.bands.plasma_membrane_y).y;
+                    let mm_nm_y = map_to_mini(0.0, wl.bands.nuclear_envelope_y).y;
+                    painter.line_segment(
+                        [
+                            Pos2::new(minimap_inner.left(), mm_pm_y),
+                            Pos2::new(minimap_inner.right(), mm_pm_y),
+                        ],
+                        Stroke::new(0.8_f32, pal.grid_line),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(minimap_inner.left(), mm_nm_y),
+                            Pos2::new(minimap_inner.right(), mm_nm_y),
+                        ],
+                        Stroke::new(0.8_f32, pal.grid_line),
+                    );
 
-                for edge in &wl.edges {
-                    if let (Some(&wp1), Some(&wp2)) =
-                        (world_positions.get(&edge.from), world_positions.get(&edge.to))
-                    {
-                        painter.line_segment(
-                            [map_to_mini(wp1.x, wp1.y), map_to_mini(wp2.x, wp2.y)],
-                            Stroke::new(0.7_f32, Color32::from_rgba_unmultiplied(120, 136, 160, 110)),
+                    for edge in &wl.edges {
+                        if let (Some(&wp1), Some(&wp2)) =
+                            (world_positions.get(&edge.from), world_positions.get(&edge.to))
+                        {
+                            painter.line_segment(
+                                [map_to_mini(wp1.x, wp1.y), map_to_mini(wp2.x, wp2.y)],
+                                Stroke::new(
+                                    0.7_f32,
+                                    Color32::from_rgba_unmultiplied(120, 136, 160, 110),
+                                ),
+                            );
+                        }
+                    }
+
+                    for (nid, &wpos) in &world_positions {
+                        let is_sel = self.selected_pathway_node.as_deref() == Some(nid.as_str());
+                        let dot_col = if is_sel {
+                            Color32::from_rgb(250, 204, 21)
+                        } else if let Some(st) = map_res.states.get(nid) {
+                            if let Some(fc) = st.observed_log2fc {
+                                pal.color_for_log2fc(fc)
+                            } else {
+                                pal.color_for_activity(st.predicted_activity)
+                            }
+                        } else {
+                            pal.neutral_node
+                        };
+                        painter.circle_filled(
+                            map_to_mini(wpos.x, wpos.y),
+                            if is_sel { 3.2 } else { 2.1 },
+                            dot_col,
                         );
                     }
-                }
 
-                for (nid, &wpos) in &world_positions {
-                    let is_sel = self.selected_pathway_node.as_deref() == Some(nid.as_str());
-                    let dot_col = if is_sel {
-                        Color32::from_rgb(250, 204, 21)
-                    } else if let Some(st) = map_res.states.get(nid) {
-                        if let Some(fc) = st.observed_log2fc {
-                            pal.color_for_log2fc(fc)
-                        } else {
-                            pal.color_for_activity(st.predicted_activity)
-                        }
-                    } else {
-                        pal.neutral_node
-                    };
-                    painter.circle_filled(
-                        map_to_mini(wpos.x, wpos.y),
-                        if is_sel { 3.2 } else { 2.1 },
-                        dot_col,
+                    // Live viewport box inside Mini-Map
+                    let w_tl = screen_to_world(rect.min);
+                    let w_br = screen_to_world(rect.max);
+                    let v_tl = map_to_mini(w_tl.x, w_tl.y);
+                    let v_br = map_to_mini(w_br.x, w_br.y);
+                    let vp_rect = Rect::from_min_max(v_tl, v_br).intersect(minimap_inner);
+                    painter.rect_filled(
+                        vp_rect,
+                        2.0,
+                        Color32::from_rgba_unmultiplied(56, 189, 248, 34),
+                    );
+                    painter.rect_stroke(
+                        vp_rect,
+                        2.0,
+                        Stroke::new(1.4_f32, Color32::from_rgb(56, 189, 248)),
+                    );
+                    painter.text(
+                        Pos2::new(
+                            minimap_rect.left() + 7.0,
+                            minimap_rect.top() + minimap_header_h * 0.5,
+                        ),
+                        Align2::LEFT_CENTER,
+                        "MINI-MAP",
+                        FontId::proportional(8.5),
+                        pal.text_muted,
+                    );
+                    painter.text(
+                        Pos2::new(
+                            minimap_rect.right() - 22.0,
+                            minimap_rect.top() + minimap_header_h * 0.5,
+                        ),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.0}%", zoom * 100.0),
+                        FontId::proportional(8.5),
+                        pal.text_muted,
+                    );
+                    painter.text(
+                        minimap_close_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "×",
+                        FontId::proportional(11.0),
+                        pal.text_primary,
+                    );
+                } else {
+                    painter.rect_filled(
+                        minimap_restore_rect,
+                        4.0,
+                        Color32::from_rgba_unmultiplied(24, 31, 44, 215),
+                    );
+                    painter.rect_stroke(
+                        minimap_restore_rect,
+                        4.0,
+                        Stroke::new(1.0_f32, pal.border_default),
+                    );
+                    painter.text(
+                        minimap_restore_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "Show Mini-Map",
+                        FontId::proportional(10.0),
+                        Color32::from_rgb(232, 237, 244),
                     );
                 }
-
-                // Live viewport box inside Mini-Map
-                let w_tl = screen_to_world(rect.min);
-                let w_br = screen_to_world(rect.max);
-                let v_tl = map_to_mini(w_tl.x, w_tl.y);
-                let v_br = map_to_mini(w_br.x, w_br.y);
-                let vp_rect = Rect::from_min_max(v_tl, v_br).intersect(minimap_inner);
-                painter.rect_filled(
-                    vp_rect,
-                    2.0,
-                    Color32::from_rgba_unmultiplied(56, 189, 248, 34),
-                );
-                painter.rect_stroke(
-                    vp_rect,
-                    2.0,
-                    Stroke::new(1.4_f32, Color32::from_rgb(56, 189, 248)),
-                );
-                painter.text(
-                    Pos2::new(minimap_rect.left() + 7.0, minimap_rect.top() + minimap_header_h * 0.5),
-                    Align2::LEFT_CENTER,
-                    "MINI-MAP",
-                    FontId::proportional(8.5),
-                    pal.text_muted,
-                );
-                painter.text(
-                    Pos2::new(minimap_rect.right() - 7.0, minimap_rect.top() + minimap_header_h * 0.5),
-                    Align2::RIGHT_CENTER,
-                    format!("{:.0}%", zoom * 100.0),
-                    FontId::proportional(8.5),
-                    pal.text_muted,
-                );
             });
         });
     }
@@ -3125,21 +3661,43 @@ impl CausalAtlasApp {
         let rep = self.reports[self.active_cohort_idx].clone();
         let sel_u_idx = self.selected_ura_idx;
         let total_avail_h = ui.available_height().max(380.0);
+        let ura_rows = self.filtered_sorted_ura(&rep);
 
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
                 Vec2::new(560.0, total_avail_h),
                 egui::Layout::top_down(egui::Align::Min),
                 |left_ui| {
-                    left_ui.horizontal(|ui| {
+                    left_ui.horizontal_wrapped(|ui| {
                         ui.heading("Upstream Regulators (URA)");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Export CSV").clicked() {
+                                actions.push(GuiAction::ExportUraCsvDialog);
+                            }
+                        });
+                    });
+                    left_ui.horizontal_wrapped(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.regulator_search)
-                                .hint_text("Filter...")
-                                .desired_width(150.0),
+                                .hint_text("Filter regulator or type...")
+                                .desired_width(155.0),
                         );
+                        if !self.regulator_search.is_empty() && ui.small_button("✕").clicked() {
+                            self.regulator_search.clear();
+                        }
+                        for (st_f, lbl) in [
+                            (RegStateFilter::All, "All"),
+                            (RegStateFilter::Activated, "Activated"),
+                            (RegStateFilter::Inhibited, "Inhibited"),
+                        ] {
+                            if ui
+                                .selectable_label(self.ura_state_filter == st_f, lbl)
+                                .clicked()
+                            {
+                                self.ura_state_filter = st_f;
+                            }
+                        }
                     });
-                    let needle = self.regulator_search.trim().to_uppercase();
 
                     left_ui.push_id("ura_table_scroll", |ui| {
                         egui::ScrollArea::vertical()
@@ -3150,21 +3708,59 @@ impl CausalAtlasApp {
                                     .num_columns(7)
                                     .spacing([10.0, 5.0])
                                     .show(ui, |ui| {
-                                        ui.strong("Regulator");
-                                        ui.strong("Type");
-                                        ui.strong("State");
-                                        ui.strong("Act Z");
-                                        ui.strong("Bias Z");
-                                        ui.strong("Overlap P");
-                                        ui.strong("Targets");
+                                        render_sort_header(
+                                            ui,
+                                            "Regulator",
+                                            UraSortCol::Regulator,
+                                            SortDir::Asc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "Type",
+                                            UraSortCol::Type,
+                                            SortDir::Asc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "State",
+                                            UraSortCol::State,
+                                            SortDir::Asc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "Act Z",
+                                            UraSortCol::ActZ,
+                                            SortDir::Desc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "Bias Z",
+                                            UraSortCol::BiasZ,
+                                            SortDir::Desc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "Overlap P",
+                                            UraSortCol::OverlapP,
+                                            SortDir::Asc,
+                                            &mut self.ura_sort,
+                                        );
+                                        render_sort_header(
+                                            ui,
+                                            "Targets",
+                                            UraSortCol::Targets,
+                                            SortDir::Desc,
+                                            &mut self.ura_sort,
+                                        );
                                         ui.end_row();
 
-                                        for (idx, h) in rep.upstream_regulators.iter().enumerate() {
-                                            if !needle.is_empty()
-                                                && !h.regulator_id.contains(&needle)
-                                            {
-                                                continue;
-                                            }
+                                        for (orig_idx, h) in &ura_rows {
+                                            let idx = *orig_idx;
                                             let sel = sel_u_idx == idx;
                                             if ui.selectable_label(sel, &h.regulator_id).clicked()
                                             {
@@ -3503,14 +4099,22 @@ impl CausalAtlasApp {
     }
 
     fn render_cna_tab(
-        &self,
+        &mut self,
         ui: &mut Ui,
         pal: &ScientificPalette,
         actions: &mut Vec<GuiAction>,
     ) {
-        let rep = &self.reports[self.active_cohort_idx];
+        let rep = self.reports[self.active_cohort_idx].clone();
+        let cna_rows = self.filtered_sorted_cna(&rep);
         ui.columns(2, |cols| {
-            cols[0].heading("Multi-Hop Causal Networks (CNA, Depth K=1..3)");
+            cols[0].horizontal_wrapped(|ui| {
+                ui.heading("Multi-Hop Causal Networks (CNA, Depth K=1..3)");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Export CSV").clicked() {
+                        actions.push(GuiAction::ExportCnaCsvDialog);
+                    }
+                });
+            });
             cols[0].label(
                 RichText::new(
                     "Identifies root master regulators (even when transcriptionally unchanged) via multi-step signaling cascades and degree-binned Monte Carlo p-values.",
@@ -3518,6 +4122,28 @@ impl CausalAtlasApp {
                 .size(11.5)
                 .color(pal.text_muted),
             );
+            cols[0].horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cna_search)
+                        .hint_text("Filter root or relay...")
+                        .desired_width(170.0),
+                );
+                if !self.cna_search.is_empty() && ui.small_button("✕").clicked() {
+                    self.cna_search.clear();
+                }
+                for (st_f, lbl) in [
+                    (RegStateFilter::All, "All"),
+                    (RegStateFilter::Activated, "Activated"),
+                    (RegStateFilter::Inhibited, "Inhibited"),
+                ] {
+                    if ui
+                        .selectable_label(self.cna_state_filter == st_f, lbl)
+                        .clicked()
+                    {
+                        self.cna_state_filter = st_f;
+                    }
+                }
+            });
 
             cols[0].push_id("cna_scroll", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -3526,15 +4152,52 @@ impl CausalAtlasApp {
                         .num_columns(6)
                         .spacing([10.0, 5.0])
                         .show(ui, |ui| {
-                            ui.strong("Master Root");
-                            ui.strong("Depth");
-                            ui.strong("State");
-                            ui.strong("Act Z");
-                            ui.strong("Overlap P");
-                            ui.strong("Net-Bias P");
+                            render_sort_header(
+                                ui,
+                                "Master Root",
+                                CnaSortCol::Root,
+                                SortDir::Asc,
+                                &mut self.cna_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "Depth",
+                                CnaSortCol::Depth,
+                                SortDir::Asc,
+                                &mut self.cna_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "State",
+                                CnaSortCol::State,
+                                SortDir::Asc,
+                                &mut self.cna_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "Act Z",
+                                CnaSortCol::ActZ,
+                                SortDir::Desc,
+                                &mut self.cna_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "Overlap P",
+                                CnaSortCol::OverlapP,
+                                SortDir::Asc,
+                                &mut self.cna_sort,
+                            );
+                            render_sort_header(
+                                ui,
+                                "Net-Bias P",
+                                CnaSortCol::NetBiasP,
+                                SortDir::Asc,
+                                &mut self.cna_sort,
+                            );
                             ui.end_row();
 
-                            for (idx, h) in rep.causal_networks.iter().enumerate() {
+                            for (orig_idx, h) in &cna_rows {
+                                let idx = *orig_idx;
                                 let sel = self.selected_cna_idx == idx;
                                 if ui.selectable_label(sel, &h.root_regulator).clicked() {
                                     actions.push(GuiAction::SelectCnaIndex(idx));
@@ -4583,6 +5246,508 @@ impl CausalAtlasApp {
             });
         });
     }
+
+    fn process_keyboard_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        wants_kb: bool,
+        actions: &mut Vec<GuiAction>,
+    ) {
+        // Always active: Ctrl/Cmd+F (Omnibox), F1 (About), layered Escape
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F)) {
+            self.omnibox_focus_requested = true;
+            self.omnibox_dropdown_open = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.about_open = !self.about_open;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.omnibox_dropdown_open {
+                self.omnibox_dropdown_open = false;
+            } else if self.about_open {
+                self.about_open = false;
+            } else if self.pathway_fullscreen {
+                self.pathway_fullscreen = false;
+                self.pathway_fit_pending = true;
+            }
+        }
+
+        if wants_kb {
+            return;
+        }
+
+        let (cmd_o, cmd_s, cmd_e, plain_key) = ctx.input(|i| {
+            let cmd = i.modifiers.ctrl || i.modifiers.command;
+            let no_mods = !cmd && !i.modifiers.alt;
+            let mut plain = None;
+            if no_mods {
+                for (k, tag) in [
+                    (egui::Key::Num1, 1u8),
+                    (egui::Key::Num2, 2),
+                    (egui::Key::Num3, 3),
+                    (egui::Key::Num4, 4),
+                    (egui::Key::Num5, 5),
+                    (egui::Key::F, 6),
+                    (egui::Key::Num0, 6),
+                    (egui::Key::R, 7),
+                ] {
+                    if i.key_pressed(k) {
+                        plain = Some(tag);
+                        break;
+                    }
+                }
+            }
+            (
+                cmd && i.key_pressed(egui::Key::O),
+                cmd && i.key_pressed(egui::Key::S),
+                cmd && i.key_pressed(egui::Key::E),
+                plain,
+            )
+        });
+
+        if cmd_o {
+            actions.push(GuiAction::ImportDatasetDialog);
+        }
+        if cmd_s {
+            actions.push(GuiAction::ExportJsonReportDialog);
+        }
+        if cmd_e {
+            if self.active_tab == WorkbenchTab::PhenotypeDrugMatch
+                && self.phenotype_subtab == PhenotypeDrugSubTab::DownstreamTreeMap
+            {
+                actions.push(GuiAction::ExportTreeMapSvgDialog);
+            } else {
+                actions.push(GuiAction::ExportPathwaySvgDialog);
+            }
+        }
+        match plain_key {
+            Some(1) => self.active_tab = WorkbenchTab::CohortVolcano,
+            Some(2) => self.active_tab = WorkbenchTab::PathwayAtlas,
+            Some(3) => self.active_tab = WorkbenchTab::CausalRegulators,
+            Some(4) => self.active_tab = WorkbenchTab::PhenotypeDrugMatch,
+            Some(5) => self.active_tab = WorkbenchTab::KnowledgeDatabases,
+            Some(6) => actions.push(GuiAction::FitPathwayViewport),
+            Some(7) => actions.push(GuiAction::ClearAllClamps),
+            _ => {}
+        }
+    }
+
+    fn save_csv_dialog(&mut self, default_name: &str, csv_text: &str, label: &str) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Comma-Separated Values (CSV)", &["csv"])
+            .set_file_name(default_name)
+            .save_file()
+        {
+            match std::fs::write(&path, csv_text) {
+                Ok(()) => {
+                    self.status_banner = format!("Exported {label} CSV to {}", path.display());
+                }
+                Err(e) => {
+                    self.status_banner = format!("CSV export error: {e}");
+                }
+            }
+        }
+    }
+
+    fn filtered_sorted_genes(&self) -> Vec<&ca_core::GeneMeasurement> {
+        let ds = &self.cohorts[self.active_cohort_idx];
+        let fc_cut = self.config.abs_log2fc_cutoff;
+        let q_cut = self.config.fdr_cutoff;
+        let needle = self.gene_search.trim().to_uppercase();
+
+        let mut rows: Vec<&ca_core::GeneMeasurement> = ds
+            .rows
+            .iter()
+            .filter(|r| {
+                if !needle.is_empty() && !r.symbol.to_uppercase().contains(&needle) {
+                    return false;
+                }
+                let pass = r.log2_fc.abs() >= fc_cut && r.fdr <= q_cut;
+                match self.gene_dir_filter {
+                    GeneDirectionFilter::All => true,
+                    GeneDirectionFilter::DegsOnly => pass,
+                    GeneDirectionFilter::UpOnly => pass && r.log2_fc > 0.0,
+                    GeneDirectionFilter::DownOnly => pass && r.log2_fc < 0.0,
+                }
+            })
+            .collect();
+
+        if let Some(sort) = self.gene_sort {
+            rows.sort_by(|a, b| {
+                let ord = match sort.col {
+                    GeneSortCol::Symbol => a.symbol.cmp(&b.symbol),
+                    GeneSortCol::Log2Fc => a.log2_fc.total_cmp(&b.log2_fc),
+                    GeneSortCol::PValue => a.p_value.total_cmp(&b.p_value),
+                    GeneSortCol::Fdr => a.fdr.total_cmp(&b.fdr),
+                };
+                sort.apply(ord).then_with(|| a.symbol.cmp(&b.symbol))
+            });
+        }
+        rows
+    }
+
+    fn filtered_sorted_ura<'a>(
+        &self,
+        rep: &'a CoreAnalysisReport,
+    ) -> Vec<(usize, &'a ca_core::UpstreamRegulatorHit)> {
+        let needle = self.regulator_search.trim().to_uppercase();
+        let mut rows: Vec<(usize, &'a ca_core::UpstreamRegulatorHit)> = rep
+            .upstream_regulators
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                self.ura_state_filter.matches(h.predicted_state)
+                    && (needle.is_empty()
+                        || h.regulator_id.to_uppercase().contains(&needle)
+                        || h.regulator_name.to_uppercase().contains(&needle)
+                        || h.kind.label().to_uppercase().contains(&needle))
+            })
+            .collect();
+
+        if let Some(sort) = self.ura_sort {
+            rows.sort_by(|(_, a), (_, b)| {
+                let ord = match sort.col {
+                    UraSortCol::Regulator => a.regulator_id.cmp(&b.regulator_id),
+                    UraSortCol::Type => a.kind.label().cmp(b.kind.label()),
+                    UraSortCol::State => a.predicted_state.label().cmp(b.predicted_state.label()),
+                    UraSortCol::ActZ => a.activation_z.total_cmp(&b.activation_z),
+                    UraSortCol::BiasZ => a.bias_corrected_z.total_cmp(&b.bias_corrected_z),
+                    UraSortCol::OverlapP => a.p_value.total_cmp(&b.p_value),
+                    UraSortCol::Targets => a.overlap_count.cmp(&b.overlap_count),
+                };
+                sort.apply(ord)
+                    .then_with(|| a.regulator_id.cmp(&b.regulator_id))
+            });
+        }
+        rows
+    }
+
+    fn filtered_sorted_cna<'a>(
+        &self,
+        rep: &'a CoreAnalysisReport,
+    ) -> Vec<(usize, &'a ca_core::CausalNetworkHit)> {
+        let needle = self.cna_search.trim().to_uppercase();
+        let mut rows: Vec<(usize, &'a ca_core::CausalNetworkHit)> = rep
+            .causal_networks
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                self.cna_state_filter.matches(h.predicted_state)
+                    && (needle.is_empty()
+                        || h.root_regulator.to_uppercase().contains(&needle)
+                        || h.root_name.to_uppercase().contains(&needle)
+                        || h.kind.label().to_uppercase().contains(&needle)
+                        || h.intermediate_regulators
+                            .iter()
+                            .any(|mid| mid.to_uppercase().contains(&needle)))
+            })
+            .collect();
+
+        if let Some(sort) = self.cna_sort {
+            rows.sort_by(|(_, a), (_, b)| {
+                let ord = match sort.col {
+                    CnaSortCol::Root => a.root_regulator.cmp(&b.root_regulator),
+                    CnaSortCol::Depth => a.max_depth_k.cmp(&b.max_depth_k),
+                    CnaSortCol::State => a.predicted_state.label().cmp(b.predicted_state.label()),
+                    CnaSortCol::ActZ => a.activation_z.total_cmp(&b.activation_z),
+                    CnaSortCol::OverlapP => a.overlap_p_value.total_cmp(&b.overlap_p_value),
+                    CnaSortCol::NetBiasP => a.network_bias_p_value.total_cmp(&b.network_bias_p_value),
+                };
+                sort.apply(ord)
+                    .then_with(|| a.root_regulator.cmp(&b.root_regulator))
+            });
+        }
+        rows
+    }
+
+    fn export_genes_csv_string(&self) -> String {
+        use std::fmt::Write as _;
+        let fc_cut = self.config.abs_log2fc_cutoff;
+        let q_cut = self.config.fdr_cutoff;
+        let mut out = String::from("symbol,log2_fc,p_value,bh_fdr,passes_cutoffs\n");
+        for r in self.filtered_sorted_genes() {
+            let pass = r.log2_fc.abs() >= fc_cut && r.fdr <= q_cut;
+            let _ = writeln!(
+                out,
+                "{},{:.6},{:.6e},{:.6e},{}",
+                csv_escape(&r.symbol),
+                r.log2_fc,
+                r.p_value,
+                r.fdr,
+                pass
+            );
+        }
+        out
+    }
+
+    fn export_ura_csv_string(&self) -> String {
+        use std::fmt::Write as _;
+        let rep = self.current_report();
+        let mut out = String::from(
+            "rank,regulator_id,regulator_name,kind,predicted_state,activation_z,bias_corrected_z,skew_flagged,overlap_count,regulon_size,overlap_p_value,bh_fdr,observed_log2fc,mechanistic_summary\n",
+        );
+        for (display_rank, (_, h)) in self.filtered_sorted_ura(rep).into_iter().enumerate() {
+            let obs = h
+                .observed_log2fc
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "NA".to_string());
+            let _ = writeln!(
+                out,
+                "{},{},{},{},{},{:.6},{:.6},{},{},{},{:.6e},{:.6e},{},{}",
+                display_rank + 1,
+                csv_escape(&h.regulator_id),
+                csv_escape(&h.regulator_name),
+                csv_escape(h.kind.label()),
+                csv_escape(h.predicted_state.label()),
+                h.activation_z,
+                h.bias_corrected_z,
+                h.skew_flagged,
+                h.overlap_count,
+                h.regulon_size,
+                h.p_value,
+                h.fdr,
+                obs,
+                csv_escape(h.mechanistic_summary.as_deref().unwrap_or("")),
+            );
+        }
+        out
+    }
+
+    fn export_cna_csv_string(&self) -> String {
+        use std::fmt::Write as _;
+        let rep = self.current_report();
+        let mut out = String::from(
+            "rank,root_regulator,root_name,kind,max_depth_k,predicted_state,activation_z,overlap_p_value,network_bias_p_value,target_count,intermediate_regulators\n",
+        );
+        for (display_rank, (_, h)) in self.filtered_sorted_cna(rep).into_iter().enumerate() {
+            let relays = h.intermediate_regulators.join("; ");
+            let _ = writeln!(
+                out,
+                "{},{},{},{},{},{},{:.6},{:.6e},{:.6e},{},{}",
+                display_rank + 1,
+                csv_escape(&h.root_regulator),
+                csv_escape(&h.root_name),
+                csv_escape(h.kind.label()),
+                h.max_depth_k,
+                csv_escape(h.predicted_state.label()),
+                h.activation_z,
+                h.overlap_p_value,
+                h.network_bias_p_value,
+                h.target_count,
+                csv_escape(&relays),
+            );
+        }
+        out
+    }
+}
+
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
+fn sanitize_filename_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let collapsed: Vec<&str> = cleaned.split('_').filter(|s| !s.is_empty()).collect();
+    if collapsed.is_empty() {
+        "cohort".to_string()
+    } else {
+        collapsed.join("_")
+    }
+}
+
+fn render_sort_header<C: Copy + Eq>(
+    ui: &mut Ui,
+    label: &str,
+    col: C,
+    default_dir: SortDir,
+    sort: &mut Option<TableSort<C>>,
+) {
+    let is_active = sort.is_some_and(|s| s.col == col);
+    let text = match *sort {
+        Some(s) if s.col == col => format!("{label} {}", s.dir.glyph()),
+        _ => label.to_string(),
+    };
+    if ui
+        .selectable_label(is_active, RichText::new(text).strong())
+        .on_hover_text(format!("Click to sort by {label}"))
+        .clicked()
+    {
+        TableSort::toggle_on(sort, col, default_dir);
+    }
+}
+
+fn compute_nice_ticks(min_v: f64, max_v: f64, max_ticks: usize) -> Vec<f64> {
+    let span = (max_v - min_v).abs();
+    if span <= 1e-9 || max_ticks < 2 {
+        return vec![0.0];
+    }
+    let raw_step = span / (max_ticks as f64);
+    let mag = 10.0_f64.powf(raw_step.log10().floor());
+    let norm = raw_step / mag;
+    let nice_norm = if norm <= 1.0 {
+        1.0
+    } else if norm <= 2.0 {
+        2.0
+    } else if norm <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    let step = (nice_norm * mag).max(0.5);
+    let start_k = (min_v / step).ceil() as i64;
+    let end_k = (max_v / step).floor() as i64;
+    (start_k..=end_k).map(|k| (k as f64) * step).collect()
+}
+
+fn draw_pathway_compartment_bands(
+    painter: &egui::Painter,
+    rect: Rect,
+    pm_y: f32,
+    org_y: f32,
+    nm_y: f32,
+    zoom: f32,
+    mode: WorkbenchPaletteMode,
+) {
+    let (ext_col, pm_col, cyto_col, org_col, nuc_col) = match mode {
+        WorkbenchPaletteMode::AcademicDark => (
+            Color32::from_rgba_unmultiplied(56, 189, 248, 12),
+            Color32::from_rgba_unmultiplied(148, 163, 184, 22),
+            Color32::from_rgba_unmultiplied(30, 41, 59, 18),
+            Color32::from_rgba_unmultiplied(99, 102, 241, 12),
+            Color32::from_rgba_unmultiplied(139, 92, 246, 16),
+        ),
+        WorkbenchPaletteMode::PublicationLight => (
+            Color32::from_rgba_unmultiplied(191, 219, 254, 48),
+            Color32::from_rgba_unmultiplied(148, 163, 184, 34),
+            Color32::from_rgba_unmultiplied(226, 232, 240, 44),
+            Color32::from_rgba_unmultiplied(199, 210, 254, 42),
+            Color32::from_rgba_unmultiplied(221, 214, 254, 46),
+        ),
+    };
+
+    let fill_band = |y0: f32, y1: f32, col: Color32| {
+        let top = y0.max(rect.top());
+        let bot = y1.min(rect.bottom());
+        if bot > top + 1.0 {
+            let r = Rect::from_min_max(Pos2::new(rect.left(), top), Pos2::new(rect.right(), bot));
+            painter.rect_filled(r, 0.0, col);
+        }
+    };
+
+    let pm_half = (12.0 * zoom).clamp(5.0, 18.0);
+    fill_band(rect.top(), pm_y - pm_half, ext_col);
+    fill_band(pm_y - pm_half, pm_y + pm_half, pm_col);
+    fill_band(pm_y + pm_half, org_y, cyto_col);
+    fill_band(org_y, nm_y, org_col);
+    fill_band(nm_y, rect.bottom(), nuc_col);
+}
+
+fn draw_pathway_edge_legend(
+    painter: &egui::Painter,
+    rect: Rect,
+    pal: &ScientificPalette,
+    mode: WorkbenchPaletteMode,
+) {
+    let leg_w = (rect.width() - 200.0).clamp(240.0, 356.0);
+    if rect.width() < 280.0 || rect.height() < 120.0 {
+        return;
+    }
+    let leg_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 10.0, rect.bottom() - 32.0),
+        Vec2::new(leg_w, 22.0),
+    );
+    let bg = match mode {
+        WorkbenchPaletteMode::AcademicDark => Color32::from_rgba_unmultiplied(15, 20, 29, 218),
+        WorkbenchPaletteMode::PublicationLight => Color32::from_rgba_unmultiplied(248, 250, 252, 232),
+    };
+    painter.rect_filled(leg_rect, 4.0, bg);
+    painter.rect_stroke(leg_rect, 4.0, Stroke::new(1.0_f32, pal.grid_line));
+
+    let cy = leg_rect.center().y;
+    let mut x = leg_rect.left() + 8.0;
+
+    // Activating arrow
+    painter.line_segment(
+        [Pos2::new(x, cy), Pos2::new(x + 14.0, cy)],
+        Stroke::new(1.8_f32, pal.activated_strong),
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(x + 17.0, cy),
+            Pos2::new(x + 11.0, cy - 3.5),
+            Pos2::new(x + 11.0, cy + 3.5),
+        ],
+        pal.activated_strong,
+        Stroke::NONE,
+    ));
+    painter.text(
+        Pos2::new(x + 21.0, cy),
+        Align2::LEFT_CENTER,
+        "Activating",
+        FontId::proportional(9.5),
+        pal.text_primary,
+    );
+    x += 78.0;
+
+    // Inhibiting T-bar
+    painter.line_segment(
+        [Pos2::new(x, cy), Pos2::new(x + 14.0, cy)],
+        Stroke::new(1.8_f32, pal.inhibited_strong),
+    );
+    painter.line_segment(
+        [Pos2::new(x + 14.0, cy - 4.5), Pos2::new(x + 14.0, cy + 4.5)],
+        Stroke::new(2.0_f32, pal.inhibited_strong),
+    );
+    painter.text(
+        Pos2::new(x + 19.0, cy),
+        Align2::LEFT_CENTER,
+        "Inhibiting",
+        FontId::proportional(9.5),
+        pal.text_primary,
+    );
+    x += 75.0;
+
+    // Ambiguous / Binding
+    painter.line_segment(
+        [Pos2::new(x, cy), Pos2::new(x + 12.0, cy)],
+        Stroke::new(1.6_f32, pal.border_default),
+    );
+    painter.circle_filled(Pos2::new(x + 13.0, cy), 2.8, pal.border_default);
+    painter.text(
+        Pos2::new(x + 19.0, cy),
+        Align2::LEFT_CENTER,
+        "Binding",
+        FontId::proportional(9.5),
+        pal.text_primary,
+    );
+    x += 64.0;
+
+    if x + 76.0 <= leg_rect.right() {
+        painter.line_segment(
+            [Pos2::new(x, cy), Pos2::new(x + 14.0, cy)],
+            Stroke::new(1.8_f32, pal.inconsistent_amber),
+        );
+        painter.text(
+            Pos2::new(x + 18.0, cy),
+            Align2::LEFT_CENTER,
+            "Inconsistent",
+            FontId::proportional(9.5),
+            pal.text_primary,
+        );
+    }
 }
 
 struct TargetGeneRef<'a> {
@@ -4681,6 +5846,31 @@ mod tests {
             let out = ctx.run(input, |c| app.render_ui_frame(c));
             assert!(!out.shapes.is_empty(), "View {view} must emit shapes");
         }
+
+        // Render all 5 tabs and subtabs headless (including Volcano Plot & CNA table & hidden minimap)
+        for tab in WorkbenchTab::ALL {
+            app.active_tab = tab;
+            if tab == WorkbenchTab::PathwayAtlas {
+                app.pathway_minimap_visible = false;
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |c| app.render_ui_frame(c));
+            assert!(!out.shapes.is_empty(), "Tab {:?} must emit shapes", tab);
+        }
+        app.pathway_minimap_visible = true;
+        app.active_tab = WorkbenchTab::CausalRegulators;
+        app.causal_subtab = CausalRegulatorsSubTab::MultiHopNetworks;
+        let out_cna = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                ..Default::default()
+            },
+            |c| app.render_ui_frame(c),
+        );
+        assert!(!out_cna.shapes.is_empty());
 
         // Verify Copyright & About modal toggle
         assert!(!app.about_open);
@@ -4831,6 +6021,215 @@ mod tests {
         step_key(&mut app, egui::Key::Escape);
         assert!(!app.pathway_fullscreen);
         assert!(app.pathway_fit_pending);
+
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcuts_and_text_focus_guard_work_headless() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "causal_atlas_hotkeys_test_{}.sqlite3",
+            std::process::id()
+        ));
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+        app.map_user_clamps.insert("TNF".to_string(), 1.0);
+        app.pathway_fit_pending = false;
+
+        let run_key = |app: &mut CausalAtlasApp, key: egui::Key, modifiers: egui::Modifiers| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |c| app.render_ui_frame(c));
+        };
+
+        // Keys 1..=5 switch across the 5 workbench pillars
+        run_key(&mut app, egui::Key::Num1, egui::Modifiers::NONE);
+        assert_eq!(app.active_tab, WorkbenchTab::CohortVolcano);
+        run_key(&mut app, egui::Key::Num3, egui::Modifiers::NONE);
+        assert_eq!(app.active_tab, WorkbenchTab::CausalRegulators);
+        run_key(&mut app, egui::Key::Num4, egui::Modifiers::NONE);
+        assert_eq!(app.active_tab, WorkbenchTab::PhenotypeDrugMatch);
+        run_key(&mut app, egui::Key::Num5, egui::Modifiers::NONE);
+        assert_eq!(app.active_tab, WorkbenchTab::KnowledgeDatabases);
+        run_key(&mut app, egui::Key::Num2, egui::Modifiers::NONE);
+        assert_eq!(app.active_tab, WorkbenchTab::PathwayAtlas);
+
+        // R clears MAP clamps
+        assert!(!app.map_user_clamps.is_empty());
+        run_key(&mut app, egui::Key::R, egui::Modifiers::NONE);
+        assert!(app.map_user_clamps.is_empty());
+
+        // F and 0 trigger pathway camera fit
+        app.pathway_zoom = 2.5;
+        app.pathway_pan = Vec2::new(90.0, -45.0);
+        run_key(&mut app, egui::Key::F, egui::Modifiers::NONE);
+        assert!(app.pathway_fit_pending);
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                ..Default::default()
+            },
+            |c| app.render_ui_frame(c),
+        );
+        assert_eq!(app.pathway_pan, Vec2::ZERO);
+
+        app.pathway_pan = Vec2::new(60.0, 30.0);
+        run_key(&mut app, egui::Key::Num0, egui::Modifiers::NONE);
+        assert!(app.pathway_fit_pending);
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                ..Default::default()
+            },
+            |c| app.render_ui_frame(c),
+        );
+        assert_eq!(app.pathway_pan, Vec2::ZERO);
+
+        // Text-input guard: when a TextEdit has real focus (wants_keyboard_input() == true),
+        // 1-5/F/0/R/Ctrl+E must NOT trigger tab switch, clamp reset, or export
+        app.active_tab = WorkbenchTab::PathwayAtlas;
+        app.map_user_clamps.insert("IKBKB".to_string(), -1.0);
+        app.pathway_fit_pending = false;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                modifiers: egui::Modifiers::CTRL,
+                events: vec![
+                    egui::Event::Key {
+                        key: egui::Key::Num1,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::R,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::E,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::CTRL,
+                    },
+                ],
+                ..Default::default()
+            },
+            |c| {
+                let mut guarded_actions = Vec::new();
+                app.process_keyboard_shortcuts(c, true, &mut guarded_actions);
+                assert!(guarded_actions.is_empty());
+            },
+        );
+        assert_eq!(app.active_tab, WorkbenchTab::PathwayAtlas);
+        assert!(!app.map_user_clamps.is_empty());
+
+        // Ctrl+E when NOT in text input queues ExportPathwaySvgDialog
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                modifiers: egui::Modifiers::CTRL,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::E,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                }],
+                ..Default::default()
+            },
+            |c| {
+                let mut acts = Vec::new();
+                app.process_keyboard_shortcuts(c, false, &mut acts);
+                assert!(
+                    matches!(acts.as_slice(), [GuiAction::ExportPathwaySvgDialog]),
+                    "Unexpected acts: {}",
+                    acts.len()
+                );
+            },
+        );
+
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn tables_sort_filter_csv_export_and_minimap_toggle_work() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "causal_atlas_tables_test_{}.sqlite3",
+            std::process::id()
+        ));
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+
+        // Minimap toggle action flips visibility cleanly
+        assert!(app.pathway_minimap_visible);
+        app.apply_action(&ctx, GuiAction::TogglePathwayMinimap);
+        assert!(!app.pathway_minimap_visible);
+        app.apply_action(&ctx, GuiAction::TogglePathwayMinimap);
+        assert!(app.pathway_minimap_visible);
+
+        // Gene filtering & sorting + CSV export
+        app.gene_dir_filter = GeneDirectionFilter::DownOnly;
+        app.gene_sort = Some(TableSort {
+            col: GeneSortCol::Log2Fc,
+            dir: SortDir::Asc,
+        });
+        let genes = app.filtered_sorted_genes();
+        assert!(!genes.is_empty());
+        assert!(genes.iter().all(|g| g.log2_fc < 0.0));
+        assert!(genes.windows(2).all(|w| w[0].log2_fc <= w[1].log2_fc));
+        let gene_csv = app.export_genes_csv_string();
+        assert!(gene_csv.starts_with("symbol,log2_fc,p_value,bh_fdr,passes_cutoffs\n"));
+        assert!(gene_csv.contains("KLF2"));
+
+        // URA filtering & sorting + CSV export
+        app.ura_state_filter = RegStateFilter::Inhibited;
+        app.ura_sort = Some(TableSort {
+            col: UraSortCol::ActZ,
+            dir: SortDir::Asc,
+        });
+        let rep = app.reports[0].clone();
+        let ura_rows = app.filtered_sorted_ura(&rep);
+        assert!(!ura_rows.is_empty());
+        assert!(ura_rows
+            .iter()
+            .all(|(_, h)| h.predicted_state == PredictedState::Inhibited));
+        let ura_csv = app.export_ura_csv_string();
+        assert!(ura_csv.contains("DEXAMETHASONE"));
+        assert!(!ura_csv.contains(",TNF,"));
+
+        // CNA filtering & sorting + CSV export
+        app.cna_state_filter = RegStateFilter::Activated;
+        app.cna_sort = Some(TableSort {
+            col: CnaSortCol::NetBiasP,
+            dir: SortDir::Asc,
+        });
+        let cna_rows = app.filtered_sorted_cna(&rep);
+        assert!(!cna_rows.is_empty());
+        assert!(cna_rows
+            .windows(2)
+            .all(|w| w[0].1.network_bias_p_value <= w[1].1.network_bias_p_value));
+        let cna_csv = app.export_cna_csv_string();
+        assert!(cna_csv.starts_with("rank,root_regulator,root_name,kind,max_depth_k,"));
 
         drop(app);
         for suffix in ["", "-wal", "-shm"] {

@@ -17,7 +17,7 @@
 
 use crate::dataset::ActiveDataset;
 use crate::graph::{EdgeClass, EdgeSign, EntityKind, KnowledgeGraph};
-use crate::stats::{benjamini_hochberg, fishers_exact_right_tail, kramer_activation_z};
+use crate::stats::{benjamini_hochberg_with_total, fishers_exact_right_tail, kramer_activation_z};
 use crate::CoreAnalysisConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,6 +110,7 @@ pub fn run_upstream_regulators(
 
     let mut hits = Vec::new();
     let mut p_vals = Vec::new();
+    let mut total_tested_regulators = 0usize;
 
     for (reg_id, edge_indices) in &kg.out_edges_t {
         if let Some(node) = kg.nodes.get(reg_id) {
@@ -136,6 +137,7 @@ pub fn run_upstream_regulators(
         if regulon_size < 2 {
             continue;
         }
+        total_tested_regulators += 1;
 
         let mut signed_total = 0usize;
         let mut signed_sum = 0i32;
@@ -158,17 +160,22 @@ pub fn run_upstream_regulators(
         for (target_sym, &(sign, weight, ref sdb)) in &target_map {
             if let Some(meas) = active.degs.get(target_sym) {
                 overlap_count += 1;
-                let s_data = if meas.log2_fc > 0.0 { 1 } else { -1 };
+                let s_data: i8 = if meas.log2_fc > 0.0 {
+                    1
+                } else if meas.log2_fc < 0.0 {
+                    -1
+                } else {
+                    0
+                };
                 let s_edge = sign.as_i8();
-                let consistent = s_edge != 0 && (i32::from(s_edge) * i32::from(s_data) > 0);
-                if s_edge != 0 {
+                if s_edge != 0 && s_data != 0 {
                     z_obs.push((weight, s_edge, s_data));
                 }
                 target_evidences.push(TargetEvidence {
                     target_gene: target_sym.clone(),
                     edge_sign: sign,
                     observed_log2fc: meas.log2_fc,
-                    consistent,
+                    consistent: false,
                     source_db: sdb.clone(),
                 });
             }
@@ -180,6 +187,26 @@ pub fn run_upstream_regulators(
 
         let p_val = fishers_exact_right_tail(overlap_count, regulon_size, n_dataset, n_univ);
         let (z, z_corr, skew_flagged) = kramer_activation_z(&z_obs, mu_1, mu_2);
+        let reg_dir = if !z.is_finite() || z == 0.0 {
+            0.0
+        } else {
+            z.signum()
+        };
+        for ev in &mut target_evidences {
+            let s_edge = f64::from(ev.edge_sign.as_i8());
+            let s_data = if ev.observed_log2fc > 0.0 {
+                1.0
+            } else if ev.observed_log2fc < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
+            ev.consistent = reg_dir != 0.0
+                && s_edge != 0.0
+                && s_data != 0.0
+                && (s_edge * s_data * reg_dir > 0.0);
+        }
+
         let (reg_name, kind) = kg
             .nodes
             .get(reg_id)
@@ -213,7 +240,7 @@ pub fn run_upstream_regulators(
         });
     }
 
-    let q_vals = benjamini_hochberg(&p_vals);
+    let q_vals = benjamini_hochberg_with_total(&p_vals, total_tested_regulators);
     for (h, q) in hits.iter_mut().zip(q_vals) {
         h.fdr = q;
     }
@@ -580,5 +607,126 @@ mod tests {
         let picked_one = select_stratified_mechanistic_targets(&one_sided, 14);
         assert_eq!(picked_one.len(), 14);
         assert!(select_stratified_mechanistic_targets(&one_sided, 0).is_empty());
+    }
+
+    #[test]
+    fn inhibited_regulator_concordance_uses_z_signum_and_excludes_unsigned_members() {
+        use crate::dataset::{ExpressionDataset, GeneMeasurement};
+        use crate::graph::{CausalEdge, EdgeClass, EntityNode, SubcellularLocation};
+
+        let mut kg = KnowledgeGraph::new();
+        kg.upsert_node(EntityNode {
+            id: "INH_TF".to_string(),
+            display_name: "Inhibited Master TF".to_string(),
+            kind: EntityKind::TranscriptionRegulator,
+            location: SubcellularLocation::Nucleus,
+            family_category: "Test".to_string(),
+            external_id: None,
+            provenance_source: "Test".to_string(),
+        });
+        let mut rows = Vec::new();
+        // 7 Activating targets downregulated in data => concordant with inhibited regulator (z <= -2.0)
+        for i in 0..7 {
+            let sym = format!("DOWN_{i}");
+            kg.ensure_gene_node(&sym, "Test");
+            kg.add_edge(CausalEdge {
+                source: "INH_TF".to_string(),
+                target: sym.clone(),
+                edge_class: EdgeClass::Transcription,
+                sign: EdgeSign::Activating,
+                weight: 1.0,
+                mechanism: "activation".to_string(),
+                source_db: "Test".to_string(),
+                pmids: Vec::new(),
+            });
+            rows.push(GeneMeasurement {
+                symbol: sym,
+                log2_fc: -2.5,
+                p_value: 1e-6,
+                fdr: 1e-5,
+            });
+        }
+        // 1 Activating target upregulated in data => opposite to inhibited regulator
+        kg.ensure_gene_node("UP_DISC", "Test");
+        kg.add_edge(CausalEdge {
+            source: "INH_TF".to_string(),
+            target: "UP_DISC".to_string(),
+            edge_class: EdgeClass::Transcription,
+            sign: EdgeSign::Activating,
+            weight: 1.0,
+            mechanism: "activation".to_string(),
+            source_db: "Test".to_string(),
+            pmids: Vec::new(),
+        });
+        rows.push(GeneMeasurement {
+            symbol: "UP_DISC".to_string(),
+            log2_fc: 2.5,
+            p_value: 1e-6,
+            fdr: 1e-5,
+        });
+        // 2 unsigned (Ambiguous, sign == 0) targets => must be excluded from Kramer Z denominator
+        for u in ["UNSIG_A", "UNSIG_B"] {
+            kg.ensure_gene_node(u, "Test");
+            kg.add_edge(CausalEdge {
+                source: "INH_TF".to_string(),
+                target: u.to_string(),
+                edge_class: EdgeClass::Transcription,
+                sign: EdgeSign::Ambiguous,
+                weight: 1.0,
+                mechanism: "binding".to_string(),
+                source_db: "Test".to_string(),
+                pmids: Vec::new(),
+            });
+            rows.push(GeneMeasurement {
+                symbol: u.to_string(),
+                log2_fc: 2.0,
+                p_value: 1e-4,
+                fdr: 1e-3,
+            });
+        }
+        kg.rebuild_indices();
+
+        let ds = ExpressionDataset {
+            name: "InhibitedTest".to_string(),
+            description: String::new(),
+            rows,
+        };
+        let cfg = CoreAnalysisConfig::default();
+        let active = ds.filter_active(cfg.abs_log2fc_cutoff, cfg.fdr_cutoff, &kg);
+        let hits = run_upstream_regulators(&active, &kg, &cfg);
+        let hit = hits
+            .iter()
+            .find(|h| h.regulator_id == "INH_TF")
+            .expect("INH_TF hit");
+
+        assert_eq!(hit.predicted_state, PredictedState::Inhibited);
+        assert!(hit.activation_z <= -2.0);
+        // Exactly 8 signed targets: sum = -7 + 1 = -6 => z = -6 / sqrt(8) (unsigned targets excluded!)
+        let expected_z = -6.0 / 8.0_f64.sqrt();
+        assert!(
+            (hit.activation_z - expected_z).abs() < 1e-9,
+            "Expected z={expected_z}, got {}",
+            hit.activation_z
+        );
+        assert_eq!(hit.overlap_count, 10);
+
+        for ev in &hit.target_evidences {
+            if ev.target_gene.starts_with("DOWN_") {
+                assert!(
+                    ev.consistent,
+                    "Downregulated target {} of inhibited regulator (z={}) must be consistent=true",
+                    ev.target_gene,
+                    hit.activation_z
+                );
+            } else {
+                assert!(
+                    !ev.consistent,
+                    "Target {} ({:?}, fc={}) should be consistent=false",
+                    ev.target_gene,
+                    ev.edge_sign,
+                    ev.observed_log2fc
+                );
+            }
+        }
     }
 }

@@ -40,8 +40,43 @@ pub struct PerturbationHit {
     pub target_clamps: Vec<(String, i8)>,
 }
 
-/// Evaluates directional connectivity between the query expression profile and open-source
-/// chemical/genetic perturbation signatures (SigCom LINCS / L1000 consensus up & down sets).
+/// Two-sample unweighted Kolmogorov-Smirnov / Subramanian GSEA running-sum enrichment score
+/// over `n` ranked genes (`1..=n`), returning a value in `[-1.0, +1.0]`.
+fn ks_rank_enrichment(sorted_ranks: &[usize], n: usize) -> f64 {
+    let t = sorted_ranks.len();
+    if t == 0 || n == 0 || t >= n {
+        return 0.0;
+    }
+    let t_f = t as f64;
+    let miss_denom = (n - t) as f64;
+    let mut max_pos = 0.0f64;
+    let mut min_neg = 0.0f64;
+
+    for (idx, &v) in sorted_ranks.iter().enumerate() {
+        let j = (idx + 1) as f64;
+        let misses_before = (v.saturating_sub(idx + 1)) as f64;
+        let run_before = ((j - 1.0) / t_f) - (misses_before / miss_denom);
+        let run_after = (j / t_f) - (misses_before / miss_denom);
+        if run_after > max_pos {
+            max_pos = run_after;
+        }
+        if run_before < min_neg {
+            min_neg = run_before;
+        }
+    }
+
+    if (max_pos - min_neg.abs()).abs() <= 1e-12 {
+        0.0
+    } else if max_pos > min_neg.abs() {
+        max_pos
+    } else {
+        min_neg
+    }
+}
+
+/// Evaluates rank-based signed CMap / L1000 connectivity (two-sample KS enrichment over the
+/// finite descending `log2FC` profile) between the query profile and open-source perturbation
+/// signatures (SigCom LINCS / L1000 consensus up & down sets).
 pub fn run_perturbation_match(
     active: &ActiveDataset,
     kg: &KnowledgeGraph,
@@ -51,36 +86,65 @@ pub fn run_perturbation_match(
         return hits;
     }
 
-    let gene_fc: BTreeMap<&str, f64> = active
-        .all_ranked
-        .iter()
-        .map(|(g, fc)| (g.as_str(), *fc))
+    // Guard NaN/Inf fold-changes and deduplicate symbols keeping strongest magnitude.
+    let mut finite_map: BTreeMap<String, f64> = BTreeMap::new();
+    for (g, fc) in &active.all_ranked {
+        let sym = g.trim().to_uppercase();
+        if sym.is_empty() || !fc.is_finite() {
+            continue;
+        }
+        finite_map
+            .entry(sym)
+            .and_modify(|prev| {
+                if fc.abs() > prev.abs() {
+                    *prev = *fc;
+                }
+            })
+            .or_insert(*fc);
+    }
+
+    if finite_map.is_empty() {
+        return hits;
+    }
+
+    let mut ranked: Vec<(String, f64)> = finite_map.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let n_ranked = ranked.len();
+    let flat_profile =
+        (ranked.first().unwrap().1 - ranked.last().unwrap().1).abs() <= 1e-12;
+
+    let gene_rank: BTreeMap<String, usize> = ranked
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (g, _))| (g, idx + 1))
         .collect();
 
-    let max_abs_fc = active
-        .all_ranked
-        .iter()
-        .map(|(_, fc)| fc.abs())
-        .fold(1.0f64, f64::max);
-
     for sig in &kg.signatures {
-        let mut up_score = 0.0f64;
-        let mut down_score = 0.0f64;
+        let mut up_ranks = Vec::new();
+        let mut down_ranks = Vec::new();
         let mut matched_up = Vec::new();
         let mut matched_down = Vec::new();
 
         for g in &sig.up_genes {
-            if let Some(&fc) = gene_fc.get(g.as_str()) {
-                up_score += fc / max_abs_fc;
-                if active.degs.contains_key(g) {
+            if let Some(&r) = gene_rank.get(g) {
+                up_ranks.push(r);
+                if active
+                    .degs
+                    .get(g)
+                    .is_some_and(|m| m.log2_fc.is_finite())
+                {
                     matched_up.push(g.clone());
                 }
             }
         }
         for g in &sig.down_genes {
-            if let Some(&fc) = gene_fc.get(g.as_str()) {
-                down_score -= fc / max_abs_fc;
-                if active.degs.contains_key(g) {
+            if let Some(&r) = gene_rank.get(g) {
+                down_ranks.push(r);
+                if active
+                    .degs
+                    .get(g)
+                    .is_some_and(|m| m.log2_fc.is_finite())
+                {
                     matched_down.push(g.clone());
                 }
             }
@@ -91,9 +155,33 @@ pub fn run_perturbation_match(
             continue;
         }
 
-        let denom = (sig.up_genes.len() + sig.down_genes.len()).max(1) as f64;
-        // Scale directional concordance into [-100, +100] CMap-like score.
-        let raw_conn = ((up_score + down_score) / denom * 135.0).clamp(-100.0, 100.0);
+        up_ranks.sort_unstable();
+        up_ranks.dedup();
+        down_ranks.sort_unstable();
+        down_ranks.dedup();
+
+        let raw_score = if flat_profile {
+            0.0
+        } else {
+            let es_up = ks_rank_enrichment(&up_ranks, n_ranked);
+            let es_down = ks_rank_enrichment(&down_ranks, n_ranked);
+            if !up_ranks.is_empty() && !down_ranks.is_empty() {
+                if es_up * es_down < 0.0 {
+                    (es_up - es_down) * 0.5
+                } else {
+                    0.0
+                }
+            } else if !up_ranks.is_empty() && sig.down_genes.is_empty() {
+                es_up
+            } else if !down_ranks.is_empty() && sig.up_genes.is_empty() {
+                -es_down
+            } else {
+                (es_up - es_down) * 0.5
+            }
+        };
+
+        // Scale signed KS connectivity into [-100, +100].
+        let raw_conn = (raw_score * 100.0).clamp(-100.0, 100.0);
         let mode = if raw_conn <= -25.0 {
             "Reverser (Candidate Antagonist)".to_string()
         } else if raw_conn >= 25.0 {
@@ -121,8 +209,12 @@ pub fn run_perturbation_match(
     hits.sort_by(|a, b| {
         b.connectivity_score
             .abs()
-            .partial_cmp(&a.connectivity_score.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.connectivity_score.abs())
+            .then_with(|| {
+                (b.matched_up.len() + b.matched_down.len())
+                    .cmp(&(a.matched_up.len() + a.matched_down.len()))
+            })
+            .then_with(|| a.signature_id.cmp(&b.signature_id))
     });
 
     hits
@@ -325,5 +417,95 @@ mod tests {
                 rev.perturbagen
             );
         }
+    }
+
+    #[test]
+    fn cmap_guards_nan_fold_changes_and_scores_rank_based_signed_enrichment() {
+        use crate::dataset::{ActiveDataset, GeneMeasurement};
+        use crate::graph::PerturbationSignature;
+
+        let mut kg = KnowledgeGraph::new();
+        for g in ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "NAN_GENE", "INF_GENE"] {
+            kg.ensure_gene_node(g, "Test");
+        }
+        kg.signatures.push(PerturbationSignature {
+            id: "REV_1".to_string(),
+            perturbagen: "TestReverser".to_string(),
+            kind: PerturbationKind::SmallMoleculeCompound,
+            cell_context: "Test".to_string(),
+            mechanism_of_action: "Reverses up/down".to_string(),
+            source_db: "Test".to_string(),
+            source_url: String::new(),
+            up_genes: vec!["G7".into(), "G8".into()],
+            down_genes: vec!["G1".into(), "G2".into()],
+            target_clamps: Vec::new(),
+        });
+        kg.signatures.push(PerturbationSignature {
+            id: "SAME_DIR".to_string(),
+            perturbagen: "SameDirNoise".to_string(),
+            kind: PerturbationKind::SmallMoleculeCompound,
+            cell_context: "Test".to_string(),
+            mechanism_of_action: "Same-direction should cancel to 0".to_string(),
+            source_db: "Test".to_string(),
+            source_url: String::new(),
+            up_genes: vec!["G1".into()],
+            down_genes: vec!["G2".into()],
+            target_clamps: Vec::new(),
+        });
+        kg.rebuild_indices();
+
+        let make_active = |outlier_fc: f64, include_bad: bool| {
+            let mut degs = BTreeMap::new();
+            let mut ranked = vec![
+                ("G1".to_string(), outlier_fc),
+                ("G2".to_string(), 3.0),
+                ("G3".to_string(), 2.0),
+                ("G4".to_string(), 1.0),
+                ("G5".to_string(), -0.5),
+                ("G6".to_string(), -1.5),
+                ("G7".to_string(), -2.5),
+                ("G8".to_string(), -3.5),
+            ];
+            if include_bad {
+                ranked.push(("NAN_GENE".to_string(), f64::NAN));
+                ranked.push(("INF_GENE".to_string(), f64::INFINITY));
+            }
+            for (s, fc) in &ranked {
+                degs.insert(
+                    s.clone(),
+                    GeneMeasurement {
+                        symbol: s.clone(),
+                        log2_fc: *fc,
+                        p_value: 1e-4,
+                        fdr: 1e-3,
+                    },
+                );
+            }
+            ActiveDataset {
+                name: "NanGuardTest".to_string(),
+                total_measured: ranked.len(),
+                mapped_to_graph: ranked.len(),
+                degs,
+                all_ranked: ranked,
+            }
+        };
+
+        let hits_base = run_perturbation_match(&make_active(4.0, false), &kg);
+        let hits_nan_outlier = run_perturbation_match(&make_active(400.0, true), &kg);
+
+        let rev_base = hits_base.iter().find(|h| h.signature_id == "REV_1").unwrap();
+        let rev_nan = hits_nan_outlier.iter().find(|h| h.signature_id == "REV_1").unwrap();
+        assert!(rev_base.connectivity_score.is_finite());
+        assert!((rev_base.connectivity_score + 100.0).abs() < 1e-9);
+        assert!(
+            (rev_base.connectivity_score - rev_nan.connectivity_score).abs() < 1e-9,
+            "Rank-based CMap score must be invariant to extreme outliers and NaN/Inf rows"
+        );
+
+        let same_dir = hits_nan_outlier
+            .iter()
+            .find(|h| h.signature_id == "SAME_DIR")
+            .unwrap();
+        assert_eq!(same_dir.connectivity_score, 0.0);
     }
 }

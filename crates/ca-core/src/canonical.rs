@@ -17,7 +17,7 @@
 
 use crate::dataset::ActiveDataset;
 use crate::graph::{KnowledgeGraph, PathwayDef};
-use crate::stats::{benjamini_hochberg, fishers_exact_right_tail, kramer_activation_z};
+use crate::stats::{benjamini_hochberg_with_total, fishers_exact_right_tail, kramer_activation_z};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,6 +57,7 @@ pub fn run_canonical_pathways(
 
     let mut raw_hits = Vec::new();
     let mut p_vals = Vec::new();
+    let mut total_tested_hypotheses = 0usize;
 
     for pw in &kg.pathways {
         let unique_members: BTreeSet<&String> = pw
@@ -68,6 +69,7 @@ pub fn run_canonical_pathways(
         if pw_size == 0 {
             continue;
         }
+        total_tested_hypotheses += 1;
 
         let mut up_genes = Vec::new();
         let mut down_genes = Vec::new();
@@ -80,9 +82,15 @@ pub fn run_canonical_pathways(
                 } else if meas.log2_fc < 0.0 {
                     down_genes.push(m.clone());
                 }
-                let s_data = if meas.log2_fc > 0.0 { 1 } else { -1 };
+                let s_data = if meas.log2_fc > 0.0 {
+                    1
+                } else if meas.log2_fc < 0.0 {
+                    -1
+                } else {
+                    0
+                };
                 let s_exp = pw.member_expected_signs.get(m).copied().unwrap_or(1);
-                if s_exp != 0 {
+                if s_exp != 0 && s_data != 0 {
                     signed_obs.push((1.0, s_exp, s_data));
                 }
             }
@@ -97,8 +105,19 @@ pub fn run_canonical_pathways(
         let mean_pw_sign = if pw.member_expected_signs.is_empty() {
             1.0
         } else {
-            let s: i32 = pw.member_expected_signs.values().map(|&v| i32::from(v)).sum();
-            (s as f64) / (pw.member_expected_signs.len() as f64)
+            let mut signed_sum = 0i32;
+            let mut signed_cnt = 0usize;
+            for &v in pw.member_expected_signs.values() {
+                if v != 0 {
+                    signed_sum += i32::from(v);
+                    signed_cnt += 1;
+                }
+            }
+            if signed_cnt > 0 {
+                (signed_sum as f64) / (signed_cnt as f64)
+            } else {
+                0.0
+            }
         };
 
         let activation_z = if signed_obs.len() >= 2 {
@@ -130,7 +149,7 @@ pub fn run_canonical_pathways(
         });
     }
 
-    let q_vals = benjamini_hochberg(&p_vals);
+    let q_vals = benjamini_hochberg_with_total(&p_vals, total_tested_hypotheses);
     for (hit, q) in raw_hits.iter_mut().zip(q_vals) {
         hit.fdr = q;
         hit.neg_log10_fdr = -q.max(1e-300).log10();
@@ -310,4 +329,152 @@ pub fn simulate_map_in_kg(
     let mut enriched = pathway.clone();
     enriched.topology_edges = induced;
     simulate_map(&enriched, active, user_clamps, damping, iterations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::{ExpressionDataset, GeneMeasurement};
+    use crate::graph::{EntityKind, EntityNode, KnowledgeGraph, SubcellularLocation};
+
+    #[test]
+    fn canonical_bh_fdr_uses_total_tested_hypotheses_m_not_filtered_overlap_subset() {
+        let mut kg = KnowledgeGraph::new();
+        for i in 0..20 {
+            let g = format!("G{i:02}");
+            kg.upsert_node(EntityNode {
+                id: g.clone(),
+                display_name: g,
+                kind: EntityKind::GeneOther,
+                location: SubcellularLocation::Cytoplasm,
+                family_category: "Test".to_string(),
+                external_id: None,
+                provenance_source: "Test".to_string(),
+            });
+        }
+        // Pathway 0 overlaps 2/2 DEGs; Pathways 1..19 have 0 overlap with the dataset
+        kg.pathways.push(PathwayDef {
+            id: "PW_HIT".to_string(),
+            name: "Hit Pathway".to_string(),
+            source_db: "Test".to_string(),
+            category: "Test".to_string(),
+            url: String::new(),
+            members: vec!["G00".to_string(), "G01".to_string()],
+            member_expected_signs: BTreeMap::new(),
+            topology_edges: Vec::new(),
+            node_coords: BTreeMap::new(),
+            phospho_nodes: Vec::new(),
+            cell_context_label: String::new(),
+        });
+        for p in 1..20 {
+            let a = format!("G{:02}", 2 + (p % 16));
+            let b = format!("G{:02}", 3 + (p % 16));
+            kg.pathways.push(PathwayDef {
+                id: format!("PW_NULL_{p:02}"),
+                name: format!("Null Pathway {p}"),
+                source_db: "Test".to_string(),
+                category: "Test".to_string(),
+                url: String::new(),
+                members: vec![a, b],
+                member_expected_signs: BTreeMap::new(),
+                topology_edges: Vec::new(),
+                node_coords: BTreeMap::new(),
+                phospho_nodes: Vec::new(),
+                cell_context_label: String::new(),
+            });
+        }
+        // Empty pathway (0 universe members) must NOT inflate total tested hypotheses m
+        kg.pathways.push(PathwayDef {
+            id: "PW_EMPTY".to_string(),
+            name: "Empty Pathway".to_string(),
+            source_db: "Test".to_string(),
+            category: "Test".to_string(),
+            url: String::new(),
+            members: Vec::new(),
+            member_expected_signs: BTreeMap::new(),
+            topology_edges: Vec::new(),
+            node_coords: BTreeMap::new(),
+            phospho_nodes: Vec::new(),
+            cell_context_label: String::new(),
+        });
+        kg.rebuild_indices();
+
+        let ds = ExpressionDataset {
+            name: "Test".to_string(),
+            description: String::new(),
+            rows: vec![
+                GeneMeasurement {
+                    symbol: "G00".to_string(),
+                    log2_fc: 2.5,
+                    p_value: 1e-5,
+                    fdr: 1e-4,
+                },
+                GeneMeasurement {
+                    symbol: "G01".to_string(),
+                    log2_fc: 2.1,
+                    p_value: 2e-5,
+                    fdr: 2e-4,
+                },
+            ],
+        };
+        let active = ds.filter_active(1.0, 0.05, &kg);
+        let hits = run_canonical_pathways(&active, &kg);
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        // p_value = C(2,2)/C(20,2) = 1/190. With m=20 total tested pathways, FDR = 20 * (1/190) = 2/19
+        let expected_p: f64 = 1.0 / 190.0;
+        let expected_fdr = (expected_p * 20.0).min(1.0);
+        assert!((hit.p_value - expected_p).abs() < 1e-12);
+        assert!(
+            (hit.fdr - expected_fdr).abs() < 1e-12,
+            "Expected FDR over m=20 ({expected_fdr}), got {}",
+            hit.fdr
+        );
+    }
+
+    #[test]
+    fn canonical_excludes_unsigned_members_from_z_and_mean_sign() {
+        let mut kg = KnowledgeGraph::new();
+        for sym in ["A", "B", "C", "D"] {
+            kg.ensure_gene_node(sym, "Test");
+        }
+        let mut signs = BTreeMap::new();
+        signs.insert("A".to_string(), 1);
+        signs.insert("B".to_string(), 1);
+        signs.insert("C".to_string(), 0);
+        signs.insert("D".to_string(), 0);
+        kg.pathways.push(PathwayDef {
+            id: "PW_MIX".to_string(),
+            name: "Mixed Signed/Unsigned".to_string(),
+            source_db: "Test".to_string(),
+            category: "Test".to_string(),
+            url: String::new(),
+            members: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            member_expected_signs: signs,
+            topology_edges: Vec::new(),
+            node_coords: BTreeMap::new(),
+            phospho_nodes: Vec::new(),
+            cell_context_label: String::new(),
+        });
+        kg.rebuild_indices();
+
+        let ds = ExpressionDataset {
+            name: "Test".to_string(),
+            description: String::new(),
+            rows: ["A", "B", "C", "D"]
+                .into_iter()
+                .map(|s| GeneMeasurement {
+                    symbol: s.to_string(),
+                    log2_fc: 2.0,
+                    p_value: 1e-4,
+                    fdr: 1e-3,
+                })
+                .collect(),
+        };
+        let active = ds.filter_active(1.0, 0.05, &kg);
+        let hits = run_canonical_pathways(&active, &kg);
+        let z = hits[0].activation_z.expect("Z present");
+        // Only the 2 signed members (A, B) contribute to kramer_activation_z => z = 2 / sqrt(2)
+        assert!((z - 2.0_f64.sqrt()).abs() < 1e-9, "got z={z}");
+    }
 }

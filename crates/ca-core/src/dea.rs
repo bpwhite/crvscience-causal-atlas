@@ -17,7 +17,7 @@
 
 use crate::dataset::ActiveDataset;
 use crate::graph::{EdgeSign, EntityKind, KnowledgeGraph};
-use crate::stats::{benjamini_hochberg, fishers_exact_right_tail, kramer_activation_z};
+use crate::stats::{benjamini_hochberg_with_total, fishers_exact_right_tail, kramer_activation_z};
 use crate::ura::{PredictedState, UpstreamRegulatorHit};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +50,7 @@ pub fn run_downstream_effects(
 
     let mut hits = Vec::new();
     let mut p_vals = Vec::new();
+    let mut total_tested_terms = 0usize;
 
     for (proc_id, edge_indices) in &kg.in_edges_p {
         let mut gene_map: BTreeMap<String, (EdgeSign, f64)> = BTreeMap::new();
@@ -63,6 +64,7 @@ pub fn run_downstream_effects(
         if gene_map.len() < 2 {
             continue;
         }
+        total_tested_terms += 1;
 
         let mut signed_cnt = 0usize;
         let mut signed_sum = 0i32;
@@ -140,7 +142,7 @@ pub fn run_downstream_effects(
         });
     }
 
-    let q_vals = benjamini_hochberg(&p_vals);
+    let q_vals = benjamini_hochberg_with_total(&p_vals, total_tested_terms);
     for (h, q) in hits.iter_mut().zip(q_vals) {
         h.fdr = q;
     }
@@ -318,13 +320,7 @@ pub fn run_regulator_effects(
         let u_consistent_genes: BTreeSet<&str> = u
             .target_evidences
             .iter()
-            .filter(|t| {
-                if u.activation_z >= 0.0 {
-                    t.consistent
-                } else {
-                    !t.consistent && t.edge_sign != EdgeSign::Ambiguous
-                }
-            })
+            .filter(|t| t.consistent)
             .map(|t| t.target_gene.as_str())
             .collect();
 
