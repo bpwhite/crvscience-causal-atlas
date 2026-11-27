@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "SQLite WAL cache engine, batch GPML/Reactome/OmniPath downloaders, and open-source biological stream parsers"
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 ca-core = { path = "../ca-core" }

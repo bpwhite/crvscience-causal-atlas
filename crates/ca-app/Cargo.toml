@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Native Rust GUI (eframe/egui), headless TUI (ratatui), and CLI workbench for open-source causal pathway analysis"
+homepage.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "causal-atlas"
