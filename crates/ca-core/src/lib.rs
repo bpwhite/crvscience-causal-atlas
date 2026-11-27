@@ -68,8 +68,9 @@ pub use layout::{
     PathwayWorldLayout, TieredNodeSpec, TieredWorldLayout, MIN_NODE_DX, MIN_NODE_DY,
 };
 pub use perturb::{
+    compute_regulator_rank_diff, format_regulator_rank_diff_csv, format_regulator_rank_diff_json,
     run_comparison_analysis, run_perturbation_match, ComparisonMatrix, ComparisonMetric,
-    PerturbationHit,
+    PerturbationHit, PerturbationRankDiffDigest, RegulatorRankDiffEntry,
 };
 pub use ura::{
     build_mechanistic_network, format_z_2dp, round_z_2dp, run_upstream_regulators,

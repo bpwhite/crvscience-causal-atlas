@@ -23,7 +23,8 @@ use crate::theme::{
 };
 use ca_core::{
     build_mechanistic_network, builtin_cohorts, compute_pathway_world_layout_cached,
-    compute_tiered_causal_layout, parse_expression_table, recompute_and_cache_pathway_layout,
+    compute_regulator_rank_diff, compute_tiered_causal_layout, format_regulator_rank_diff_csv,
+    format_regulator_rank_diff_json, parse_expression_table, recompute_and_cache_pathway_layout,
     run_comparison_analysis, run_core_analysis, seed_kb::build_seed_knowledge_graph,
     select_stratified_mechanistic_targets, simulate_map_in_kg, ComparisonMetric,
     CoreAnalysisConfig, CoreAnalysisReport, EdgeSign, EntityKind, ExpressionDataset,
@@ -245,6 +246,10 @@ enum GuiAction {
     ExportGenesCsvDialog,
     ExportUraCsvDialog,
     ExportCnaCsvDialog,
+    SetDiffCohortA(usize),
+    SetDiffCohortB(usize),
+    ExportRankDiffJsonDialog,
+    ExportRankDiffCsvDialog,
     SaveSnapshotDialog,
     LoadSnapshotDialog,
     ImportStreamFileDialog,
@@ -283,6 +288,185 @@ enum GuiAction {
         hit_idx: usize,
         switch_tab: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaPaletteAction {
+    TabCohortVolcano,
+    TabPathwayAtlas,
+    TabCausalRegulators,
+    TabPhenotypeComparison,
+    TabKnowledgeDatabases,
+    FocusOmnibox,
+    RunCoreAnalysis,
+    SyncAllCohorts,
+    FitPathwayCamera,
+    ClearMapClamps,
+    ToggleTheme,
+    ExportReportJson,
+    ExportPathwaySvg,
+    ExportRankDiffJson,
+    ExportRankDiffCsv,
+    ToggleAbout,
+}
+
+struct CaPaletteCommand {
+    label: &'static str,
+    category: &'static str,
+    hotkey: &'static str,
+    keywords: &'static str,
+    action: CaPaletteAction,
+}
+
+const CA_PALETTE_COMMANDS: &[CaPaletteCommand] = &[
+    CaPaletteCommand {
+        label: "Switch to Cohort & Volcano Table",
+        category: "View",
+        hotkey: "1",
+        keywords: "cohort volcano deg table expression tab",
+        action: CaPaletteAction::TabCohortVolcano,
+    },
+    CaPaletteCommand {
+        label: "Switch to Pathway Atlas (MAP)",
+        category: "View",
+        hotkey: "2",
+        keywords: "pathway atlas map diagram wikipathways reactome tab",
+        action: CaPaletteAction::TabPathwayAtlas,
+    },
+    CaPaletteCommand {
+        label: "Switch to Causal Regulators (URA / CNA)",
+        category: "View",
+        hotkey: "3",
+        keywords: "causal regulators upstream ura cna mechanistic tab",
+        action: CaPaletteAction::TabCausalRegulators,
+    },
+    CaPaletteCommand {
+        label: "Switch to Multi-Cohort Comparison & Reversers",
+        category: "View",
+        hotkey: "4",
+        keywords: "comparison heatmap reversers mimickers lincs phenotype tab",
+        action: CaPaletteAction::TabPhenotypeComparison,
+    },
+    CaPaletteCommand {
+        label: "Switch to Knowledge Databases (SQLite Streams)",
+        category: "View",
+        hotkey: "5",
+        keywords: "knowledge databases streams sqlite sync tab",
+        action: CaPaletteAction::TabKnowledgeDatabases,
+    },
+    CaPaletteCommand {
+        label: "Focus Gene / Protein Omnibox",
+        category: "Navigate",
+        hotkey: "Ctrl+F",
+        keywords: "omnibox search gene protein jump focus",
+        action: CaPaletteAction::FocusOmnibox,
+    },
+    CaPaletteCommand {
+        label: "Run Core Analysis on Active Cohort",
+        category: "Analysis",
+        hotkey: "",
+        keywords: "run compute core analysis ura cna canonical",
+        action: CaPaletteAction::RunCoreAnalysis,
+    },
+    CaPaletteCommand {
+        label: "Sync & Recompute All Comparison Cohorts",
+        category: "Analysis",
+        hotkey: "",
+        keywords: "sync all cohorts comparison cache",
+        action: CaPaletteAction::SyncAllCohorts,
+    },
+    CaPaletteCommand {
+        label: "Fit Pathway Atlas Camera (Fit All)",
+        category: "Viewport",
+        hotkey: "F / 0",
+        keywords: "fit camera zoom reset pathway",
+        action: CaPaletteAction::FitPathwayCamera,
+    },
+    CaPaletteCommand {
+        label: "Clear All MAP Node Clamps",
+        category: "Simulation",
+        hotkey: "R",
+        keywords: "clear reset map clamps drug rescue",
+        action: CaPaletteAction::ClearMapClamps,
+    },
+    CaPaletteCommand {
+        label: "Toggle Dark / Publication Light Theme",
+        category: "View",
+        hotkey: "",
+        keywords: "theme palette dark light publication",
+        action: CaPaletteAction::ToggleTheme,
+    },
+    CaPaletteCommand {
+        label: "Export Full Core Analysis Report (JSON)",
+        category: "Export",
+        hotkey: "Ctrl+S",
+        keywords: "export report json core analysis",
+        action: CaPaletteAction::ExportReportJson,
+    },
+    CaPaletteCommand {
+        label: "Export Active Pathway Diagram (SVG)",
+        category: "Export",
+        hotkey: "Ctrl+E",
+        keywords: "export pathway svg vector diagram",
+        action: CaPaletteAction::ExportPathwaySvg,
+    },
+    CaPaletteCommand {
+        label: "Export Regulator Rank Diff Digest (JSON)",
+        category: "Export",
+        hotkey: "",
+        keywords: "export regulator rank diff comparison digest json",
+        action: CaPaletteAction::ExportRankDiffJson,
+    },
+    CaPaletteCommand {
+        label: "Export Regulator Rank Diff Digest (CSV)",
+        category: "Export",
+        hotkey: "",
+        keywords: "export regulator rank diff comparison digest csv",
+        action: CaPaletteAction::ExportRankDiffCsv,
+    },
+    CaPaletteCommand {
+        label: "Toggle About Causal Atlas Dialog",
+        category: "Help",
+        hotkey: "F1",
+        keywords: "about help version license citation",
+        action: CaPaletteAction::ToggleAbout,
+    },
+];
+
+fn ca_fuzzy_palette_score(query: &str, label: &str, keywords: &str) -> Option<i32> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return Some(1000);
+    }
+    let hay = format!("{} {}", label, keywords).to_ascii_lowercase();
+    if let Some(pos) = label.to_ascii_lowercase().find(&q) {
+        return Some(800 - (pos as i32) * 2);
+    }
+    if let Some(pos) = hay.find(&q) {
+        return Some(500 - (pos as i32));
+    }
+    let mut score = 200_i32;
+    let mut hay_iter = hay.chars();
+    let mut consecutive = 0_i32;
+    for qch in q.chars() {
+        if qch.is_whitespace() {
+            continue;
+        }
+        let mut matched = false;
+        for hch in hay_iter.by_ref() {
+            if hch == qch {
+                score += 12 + consecutive * 6;
+                consecutive += 1;
+                matched = true;
+                break;
+            }
+            consecutive = 0;
+        }
+        if !matched {
+            return None;
+        }
+    }
+    Some(score)
 }
 
 pub struct CausalAtlasApp {
@@ -342,6 +526,12 @@ pub struct CausalAtlasApp {
     re_pan: Vec2,
     re_fit_pending: bool,
     comparison_metric: ComparisonMetric,
+    diff_cohort_a_idx: usize,
+    diff_cohort_b_idx: usize,
+    show_command_palette: bool,
+    command_palette_query: String,
+    command_palette_selected: usize,
+    focus_command_palette: bool,
     pathway_fullscreen: bool,
     sidebar_hidden: bool,
     pathway_minimap_visible: bool,
@@ -427,6 +617,7 @@ impl CausalAtlasApp {
             .collect();
 
         let db_stats = db.stats().unwrap_or_default();
+        let default_diff_b = usize::from(reports.len() > 1);
         let (tx, rx) = mpsc::channel();
 
         Self {
@@ -483,6 +674,12 @@ impl CausalAtlasApp {
             re_pan: Vec2::ZERO,
             re_fit_pending: true,
             comparison_metric: ComparisonMetric::UpstreamRegulatorsZ,
+            diff_cohort_a_idx: 0,
+            diff_cohort_b_idx: default_diff_b,
+            show_command_palette: false,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
+            focus_command_palette: false,
             pathway_fullscreen: false,
             sidebar_hidden: false,
             pathway_minimap_visible: true,
@@ -972,6 +1169,57 @@ impl CausalAtlasApp {
                     &csv_text,
                     "Causal Networks",
                 );
+            }
+            GuiAction::SetDiffCohortA(idx) => {
+                if idx < self.reports.len() {
+                    self.diff_cohort_a_idx = idx;
+                }
+            }
+            GuiAction::SetDiffCohortB(idx) => {
+                if idx < self.reports.len() {
+                    self.diff_cohort_b_idx = idx;
+                }
+            }
+            GuiAction::ExportRankDiffJsonDialog => {
+                if let Some((rep_a, rep_b)) = self.diff_report_pair() {
+                    let digest = compute_regulator_rank_diff(rep_a, rep_b);
+                    let default_name = format!(
+                        "{}_vs_{}_rank_diff.json",
+                        sanitize_filename_stem(&digest.cohort_a_name),
+                        sanitize_filename_stem(&digest.cohort_b_name)
+                    );
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON Rank Diff Digest", &["json"])
+                        .set_file_name(&default_name)
+                        .save_file()
+                    {
+                        match format_regulator_rank_diff_json(&digest)
+                            .and_then(|txt| std::fs::write(&path, txt).map_err(|e| e.to_string()))
+                        {
+                            Ok(()) => {
+                                self.status_banner = format!(
+                                    "Exported Regulator Rank Diff JSON ({} shared, {} flips) to {}",
+                                    digest.shared_count,
+                                    digest.direction_flip_count,
+                                    path.display()
+                                );
+                            }
+                            Err(e) => self.status_banner = format!("Rank diff JSON export error: {e}"),
+                        }
+                    }
+                }
+            }
+            GuiAction::ExportRankDiffCsvDialog => {
+                if let Some((rep_a, rep_b)) = self.diff_report_pair() {
+                    let digest = compute_regulator_rank_diff(rep_a, rep_b);
+                    let csv_text = format_regulator_rank_diff_csv(&digest);
+                    let default_name = format!(
+                        "{}_vs_{}_rank_diff.csv",
+                        sanitize_filename_stem(&digest.cohort_a_name),
+                        sanitize_filename_stem(&digest.cohort_b_name)
+                    );
+                    self.save_csv_dialog(&default_name, &csv_text, "Regulator Rank Diff");
+                }
             }
             GuiAction::SaveSnapshotDialog => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -1732,6 +1980,10 @@ impl CausalAtlasApp {
                 self.render_open_streams_tab(ui, &pal, &mut actions);
             }
         });
+
+        if self.show_command_palette {
+            self.render_command_palette_modal(ctx, &mut actions);
+        }
 
         if self.about_open {
             let mut open = self.about_open;
@@ -4677,6 +4929,57 @@ impl CausalAtlasApp {
                     });
 
                     let comp = run_comparison_analysis(&self.reports, self.comparison_metric, 18);
+                    if let Some((rep_a, rep_b)) = self.diff_report_pair() {
+                        let digest = compute_regulator_rank_diff(rep_a, rep_b);
+                        left_ui.add_space(4.0);
+                        left_ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("Rank Diff:").strong().size(11.5));
+                            egui::ComboBox::from_id_salt("diff_cohort_a")
+                                .selected_text(rep_a.dataset_name.chars().take(16).collect::<String>())
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    for (idx, r) in self.reports.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(self.diff_cohort_a_idx == idx, &r.dataset_name)
+                                            .clicked()
+                                        {
+                                            actions.push(GuiAction::SetDiffCohortA(idx));
+                                        }
+                                    }
+                                });
+                            ui.label("vs");
+                            egui::ComboBox::from_id_salt("diff_cohort_b")
+                                .selected_text(rep_b.dataset_name.chars().take(16).collect::<String>())
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    for (idx, r) in self.reports.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(self.diff_cohort_b_idx == idx, &r.dataset_name)
+                                            .clicked()
+                                        {
+                                            actions.push(GuiAction::SetDiffCohortB(idx));
+                                        }
+                                    }
+                                });
+                            if ui.small_button("Diff JSON").clicked() {
+                                actions.push(GuiAction::ExportRankDiffJsonDialog);
+                            }
+                            if ui.small_button("Diff CSV").clicked() {
+                                actions.push(GuiAction::ExportRankDiffCsvDialog);
+                            }
+                        });
+                        left_ui.label(
+                            RichText::new(format!(
+                                "Regulator Rank Diff: {} shared | {} flips | Spearman rho = {:.3}",
+                                digest.shared_count,
+                                digest.direction_flip_count,
+                                digest.spearman_rank_rho
+                            ))
+                            .size(11.0)
+                            .color(pal.text_muted),
+                        );
+                        left_ui.add_space(4.0);
+                    }
                     let entity_max_w = (left_w - (comp.cohort_names.len() as f32 * 72.0) - 28.0).max(150.0);
                     left_ui.push_id("comp_heatmap_scroll", |ui| {
                         egui::ScrollArea::both().show(ui, |ui| {
@@ -5253,7 +5556,48 @@ impl CausalAtlasApp {
         wants_kb: bool,
         actions: &mut Vec<GuiAction>,
     ) {
-        // Always active: Ctrl/Cmd+F (Omnibox), F1 (About), layered Escape
+        // Always active: Ctrl/Cmd+K (Command Palette), Ctrl/Cmd+F (Omnibox), F1 (About), layered Escape
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::K)) {
+            self.show_command_palette = !self.show_command_palette;
+            if self.show_command_palette {
+                self.command_palette_query.clear();
+                self.command_palette_selected = 0;
+                self.focus_command_palette = true;
+            }
+            return;
+        }
+        if self.show_command_palette {
+            let (esc, up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            let matches = self.filtered_palette_commands();
+            if esc {
+                self.show_command_palette = false;
+            } else if !matches.is_empty() {
+                if self.command_palette_selected >= matches.len() {
+                    self.command_palette_selected = 0;
+                }
+                if up {
+                    self.command_palette_selected = self
+                        .command_palette_selected
+                        .checked_sub(1)
+                        .unwrap_or(matches.len() - 1);
+                } else if down {
+                    self.command_palette_selected =
+                        (self.command_palette_selected + 1) % matches.len();
+                } else if enter {
+                    let chosen = matches[self.command_palette_selected].action;
+                    self.show_command_palette = false;
+                    self.execute_palette_command(chosen, actions);
+                }
+            }
+            return;
+        }
         if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F)) {
             self.omnibox_focus_requested = true;
             self.omnibox_dropdown_open = true;
@@ -5329,6 +5673,134 @@ impl CausalAtlasApp {
             Some(6) => actions.push(GuiAction::FitPathwayViewport),
             Some(7) => actions.push(GuiAction::ClearAllClamps),
             _ => {}
+        }
+    }
+
+    fn diff_report_pair(&self) -> Option<(&CoreAnalysisReport, &CoreAnalysisReport)> {
+        let a = self.reports.get(self.diff_cohort_a_idx)?;
+        let b = self
+            .reports
+            .get(self.diff_cohort_b_idx)
+            .or_else(|| self.reports.first())?;
+        Some((a, b))
+    }
+
+    fn filtered_palette_commands(&self) -> Vec<&'static CaPaletteCommand> {
+        let mut scored: Vec<(i32, usize, &'static CaPaletteCommand)> = CA_PALETTE_COMMANDS
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cmd)| {
+                ca_fuzzy_palette_score(&self.command_palette_query, cmd.label, cmd.keywords)
+                    .map(|sc| (sc, idx, cmd))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, _, cmd)| cmd).collect()
+    }
+
+    fn execute_palette_command(
+        &mut self,
+        action: CaPaletteAction,
+        actions: &mut Vec<GuiAction>,
+    ) {
+        match action {
+            CaPaletteAction::TabCohortVolcano => self.active_tab = WorkbenchTab::CohortVolcano,
+            CaPaletteAction::TabPathwayAtlas => self.active_tab = WorkbenchTab::PathwayAtlas,
+            CaPaletteAction::TabCausalRegulators => {
+                self.active_tab = WorkbenchTab::CausalRegulators;
+            }
+            CaPaletteAction::TabPhenotypeComparison => {
+                self.active_tab = WorkbenchTab::PhenotypeDrugMatch;
+                self.phenotype_subtab = PhenotypeDrugSubTab::ComparisonAndReversers;
+            }
+            CaPaletteAction::TabKnowledgeDatabases => {
+                self.active_tab = WorkbenchTab::KnowledgeDatabases;
+            }
+            CaPaletteAction::FocusOmnibox => {
+                self.omnibox_focus_requested = true;
+                self.omnibox_dropdown_open = true;
+            }
+            CaPaletteAction::RunCoreAnalysis => actions.push(GuiAction::RecomputeActive),
+            CaPaletteAction::SyncAllCohorts => actions.push(GuiAction::RecomputeAllComparison),
+            CaPaletteAction::FitPathwayCamera => actions.push(GuiAction::FitPathwayViewport),
+            CaPaletteAction::ClearMapClamps => actions.push(GuiAction::ClearAllClamps),
+            CaPaletteAction::ToggleTheme => actions.push(GuiAction::TogglePalette),
+            CaPaletteAction::ExportReportJson => actions.push(GuiAction::ExportJsonReportDialog),
+            CaPaletteAction::ExportPathwaySvg => actions.push(GuiAction::ExportPathwaySvgDialog),
+            CaPaletteAction::ExportRankDiffJson => {
+                actions.push(GuiAction::ExportRankDiffJsonDialog);
+            }
+            CaPaletteAction::ExportRankDiffCsv => {
+                actions.push(GuiAction::ExportRankDiffCsvDialog);
+            }
+            CaPaletteAction::ToggleAbout => actions.push(GuiAction::ToggleAbout),
+        }
+    }
+
+    fn render_command_palette_modal(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<GuiAction>,
+    ) {
+        let mut chosen_action: Option<CaPaletteAction> = None;
+        let matches = self.filtered_palette_commands();
+        if !matches.is_empty() && self.command_palette_selected >= matches.len() {
+            self.command_palette_selected = 0;
+        }
+        egui::Window::new("Command Palette (Ctrl+K)")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(Vec2::new(540.0, 360.0))
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 68.0))
+            .show(ctx, |ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.command_palette_query)
+                        .hint_text("Type a tab, regulator diff export, MAP action, or shortcut...")
+                        .desired_width(f32::INFINITY),
+                );
+                if self.focus_command_palette {
+                    edit.request_focus();
+                    self.focus_command_palette = false;
+                }
+                if edit.changed() {
+                    self.command_palette_selected = 0;
+                }
+                ui.label(
+                    RichText::new("Up/Down: navigate • Enter: run • Esc: close")
+                        .monospace()
+                        .size(10.5),
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(265.0)
+                    .show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.label("No matching commands.");
+                        } else {
+                            for (idx, cmd) in matches.iter().enumerate() {
+                                let selected = idx == self.command_palette_selected;
+                                let row_text = if cmd.hotkey.is_empty() {
+                                    format!("[{:<10}] {}", cmd.category, cmd.label)
+                                } else {
+                                    format!("[{:<10}] {}   ({})", cmd.category, cmd.label, cmd.hotkey)
+                                };
+                                let resp = ui.selectable_label(
+                                    selected,
+                                    RichText::new(row_text).monospace().size(11.5),
+                                );
+                                if resp.hovered() {
+                                    self.command_palette_selected = idx;
+                                }
+                                if resp.clicked() {
+                                    chosen_action = Some(cmd.action);
+                                }
+                            }
+                        }
+                    });
+            });
+        if let Some(act) = chosen_action {
+            self.show_command_palette = false;
+            self.execute_palette_command(act, actions);
         }
     }
 
@@ -6230,6 +6702,70 @@ mod tests {
             .all(|w| w[0].1.network_bias_p_value <= w[1].1.network_bias_p_value));
         let cna_csv = app.export_cna_csv_string();
         assert!(cna_csv.starts_with("rank,root_regulator,root_name,kind,max_depth_k,"));
+
+        drop(app);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn ctrl_k_command_palette_filters_switches_tabs_and_computes_rank_diff() {
+        let ctx = egui::Context::default();
+        let db_path = std::env::temp_dir().join(format!(
+            "ca_palette_test_{}.sqlite3",
+            std::process::id()
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path.display(), suffix));
+        }
+        let mut app = CausalAtlasApp::new_headless(&ctx, db_path.clone());
+        assert!(!app.show_command_palette);
+        assert!(ca_fuzzy_palette_score("diff", "Export Regulator Rank Diff (CSV)", "diff").is_some());
+        assert!(ca_fuzzy_palette_score("zzzz", "Fit Pathway Camera", "fit").is_none());
+
+        let send_key = |app: &mut CausalAtlasApp, key: egui::Key, ctrl: bool| {
+            let mods = if ctrl {
+                egui::Modifiers::CTRL
+            } else {
+                egui::Modifiers::NONE
+            };
+            let mut raw = egui::RawInput::default();
+            raw.screen_rect = Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(1280.0, 800.0),
+            ));
+            raw.modifiers = mods;
+            raw.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            });
+            let _ = ctx.run(raw, |c| app.render_ui_frame(c));
+        };
+
+        send_key(&mut app, egui::Key::K, true);
+        assert!(app.show_command_palette);
+
+        app.command_palette_query = "multi-cohort comparison".to_string();
+        send_key(&mut app, egui::Key::Enter, false);
+        assert!(!app.show_command_palette);
+        assert_eq!(app.active_tab, WorkbenchTab::PhenotypeDrugMatch);
+        assert_eq!(
+            app.phenotype_subtab,
+            PhenotypeDrugSubTab::ComparisonAndReversers
+        );
+
+        let (ra, rb) = app.diff_report_pair().expect("built-in cohorts pair");
+        let digest = compute_regulator_rank_diff(ra, rb);
+        assert!(!digest.entries.is_empty());
+
+        send_key(&mut app, egui::Key::K, true);
+        assert!(app.show_command_palette);
+        send_key(&mut app, egui::Key::Escape, false);
+        assert!(!app.show_command_palette);
 
         drop(app);
         for suffix in ["", "-wal", "-shm"] {

@@ -203,7 +203,7 @@ pub fn parse_gpml_pathway(
         }
         if refs.len() >= 2 {
             let src_opt = graph_id_to_symbol.get(&refs[0]);
-            let dst_opt = graph_id_to_symbol.get(refs.last().unwrap());
+            let dst_opt = refs.last().and_then(|r| graph_id_to_symbol.get(r));
             if let (Some(src), Some(dst)) = (src_opt, dst_opt) {
                 if src != dst {
                     topology_edges.push(PathwayReactionEdge {

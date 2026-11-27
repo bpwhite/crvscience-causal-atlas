@@ -110,8 +110,10 @@ pub fn run_perturbation_match(
     let mut ranked: Vec<(String, f64)> = finite_map.into_iter().collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let n_ranked = ranked.len();
-    let flat_profile =
-        (ranked.first().unwrap().1 - ranked.last().unwrap().1).abs() <= 1e-12;
+    let flat_profile = match (ranked.first(), ranked.last()) {
+        (Some(first), Some(last)) => (first.1 - last.1).abs() <= 1e-12,
+        _ => true,
+    };
 
     let gene_rank: BTreeMap<String, usize> = ranked
         .into_iter()
@@ -313,7 +315,9 @@ pub fn run_comparison_analysis(
     if !ranked_rows.is_empty() {
         ordered.push(ranked_rows.remove(0));
         while !ranked_rows.is_empty() {
-            let last_vec = &ordered.last().unwrap().1;
+            let Some(last_vec) = ordered.last().map(|r| &r.1) else {
+                break;
+            };
             let mut best_i = 0usize;
             let mut best_dist = f64::INFINITY;
             for (i, cand) in ranked_rows.iter().enumerate() {
@@ -348,6 +352,286 @@ pub fn run_comparison_analysis(
         values,
         significance,
     }
+}
+
+/// Per-regulator rank & activation Z-score diff between two perturbation/cohort reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegulatorRankDiffEntry {
+    pub regulator_id: String,
+    pub kind: String,
+    pub rank_a: Option<usize>,
+    pub rank_b: Option<usize>,
+    pub rank_shift: Option<i64>,
+    pub z_a: Option<f64>,
+    pub z_b: Option<f64>,
+    pub delta_z: f64,
+    pub fdr_a: Option<f64>,
+    pub fdr_b: Option<f64>,
+    pub direction_flip: bool,
+    pub status: String,
+}
+
+/// Multi-perturbation regulator rank-comparison diff digest comparing condition A vs. B.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerturbationRankDiffDigest {
+    pub schema_version: String,
+    pub cohort_a_name: String,
+    pub cohort_b_name: String,
+    pub regulators_a: usize,
+    pub regulators_b: usize,
+    pub shared_count: usize,
+    pub direction_flip_count: usize,
+    pub spearman_rank_rho: f64,
+    pub entries: Vec<RegulatorRankDiffEntry>,
+}
+
+/// Computes a ranked differential regulator comparison digest between two `CoreAnalysisReport` runs.
+pub fn compute_regulator_rank_diff(
+    report_a: &CoreAnalysisReport,
+    report_b: &CoreAnalysisReport,
+) -> PerturbationRankDiffDigest {
+    let mut rank_a_list: Vec<&crate::ura::UpstreamRegulatorHit> =
+        report_a.upstream_regulators.iter().collect();
+    rank_a_list.sort_by(|x, y| {
+        y.activation_z
+            .abs()
+            .total_cmp(&x.activation_z.abs())
+            .then_with(|| x.regulator_id.cmp(&y.regulator_id))
+    });
+    let mut rank_b_list: Vec<&crate::ura::UpstreamRegulatorHit> =
+        report_b.upstream_regulators.iter().collect();
+    rank_b_list.sort_by(|x, y| {
+        y.activation_z
+            .abs()
+            .total_cmp(&x.activation_z.abs())
+            .then_with(|| x.regulator_id.cmp(&y.regulator_id))
+    });
+
+    let mut map_a: BTreeMap<String, (usize, &crate::ura::UpstreamRegulatorHit)> = BTreeMap::new();
+    for (idx, hit) in rank_a_list.iter().enumerate() {
+        map_a.entry(hit.regulator_id.clone()).or_insert((idx + 1, *hit));
+    }
+    let mut map_b: BTreeMap<String, (usize, &crate::ura::UpstreamRegulatorHit)> = BTreeMap::new();
+    for (idx, hit) in rank_b_list.iter().enumerate() {
+        map_b.entry(hit.regulator_id.clone()).or_insert((idx + 1, *hit));
+    }
+
+    let mut all_ids: BTreeSet<String> = map_a.keys().cloned().collect();
+    all_ids.extend(map_b.keys().cloned());
+
+    let mut entries = Vec::with_capacity(all_ids.len());
+    let mut shared_count = 0usize;
+    let mut direction_flip_count = 0usize;
+    let mut shared_d2_sum = 0.0_f64;
+
+    for reg_id in all_ids {
+        let a_opt = map_a.get(&reg_id).copied();
+        let b_opt = map_b.get(&reg_id).copied();
+        let kind = a_opt
+            .map(|(_, h)| h.kind.label())
+            .or_else(|| b_opt.map(|(_, h)| h.kind.label()))
+            .unwrap_or("Regulator")
+            .to_string();
+        let rank_a = a_opt.map(|(r, _)| r);
+        let rank_b = b_opt.map(|(r, _)| r);
+        let rank_shift = match (rank_a, rank_b) {
+            (Some(ra), Some(rb)) => Some((ra as i64) - (rb as i64)),
+            _ => None,
+        };
+        let z_a = a_opt.map(|(_, h)| h.activation_z);
+        let z_b = b_opt.map(|(_, h)| h.activation_z);
+        let fdr_a = a_opt.map(|(_, h)| h.fdr);
+        let fdr_b = b_opt.map(|(_, h)| h.fdr);
+        let delta_z = z_b.unwrap_or(0.0) - z_a.unwrap_or(0.0);
+
+        let direction_flip = match (z_a, z_b) {
+            (Some(za), Some(zb)) => za.abs() >= 2.0 && zb.abs() >= 2.0 && za * zb < 0.0,
+            _ => false,
+        };
+
+        let status = match (a_opt, b_opt) {
+            (Some(_), Some(_)) => {
+                shared_count += 1;
+                if let (Some(ra), Some(rb)) = (rank_a, rank_b) {
+                    let d = (ra as f64) - (rb as f64);
+                    shared_d2_sum += d * d;
+                }
+                if direction_flip {
+                    direction_flip_count += 1;
+                    String::from("Reversed")
+                } else {
+                    String::from("Shared")
+                }
+            }
+            (None, Some(_)) => String::from("Gained_in_B"),
+            (Some(_), None) => String::from("Lost_in_B"),
+            (None, None) => String::from("Unobserved"),
+        };
+
+        entries.push(RegulatorRankDiffEntry {
+            regulator_id: reg_id,
+            kind,
+            rank_a,
+            rank_b,
+            rank_shift,
+            z_a,
+            z_b,
+            delta_z,
+            fdr_a,
+            fdr_b,
+            direction_flip,
+            status,
+        });
+    }
+
+    entries.sort_by(|x, y| {
+        y.delta_z
+            .abs()
+            .total_cmp(&x.delta_z.abs())
+            .then_with(|| x.regulator_id.cmp(&y.regulator_id))
+    });
+
+    let spearman_rank_rho = if shared_count >= 2 {
+        let n = shared_count as f64;
+        (1.0 - (6.0 * shared_d2_sum) / (n * (n * n - 1.0))).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    PerturbationRankDiffDigest {
+        schema_version: String::from("causal-atlas-rank-diff/v1"),
+        cohort_a_name: report_a.dataset_name.clone(),
+        cohort_b_name: report_b.dataset_name.clone(),
+        regulators_a: map_a.len(),
+        regulators_b: map_b.len(),
+        shared_count,
+        direction_flip_count,
+        spearman_rank_rho,
+        entries,
+    }
+}
+
+fn json_escape_ca(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Formats [`PerturbationRankDiffDigest`] as pretty-printed JSON.
+pub fn format_regulator_rank_diff_json(digest: &PerturbationRankDiffDigest) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let fmt_opt_usize = |v: Option<usize>| v.map(|x| x.to_string()).unwrap_or_else(|| String::from("null"));
+    let fmt_opt_i64 = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_else(|| String::from("null"));
+    let fmt_opt_f64 = |v: Option<f64>| {
+        v.filter(|x| x.is_finite())
+            .map(|x| format!("{x:.6}"))
+            .unwrap_or_else(|| String::from("null"))
+    };
+    let mut out = String::with_capacity(2048);
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(
+        out,
+        "  \"schema_version\": \"{}\",",
+        json_escape_ca(&digest.schema_version)
+    );
+    let _ = writeln!(
+        out,
+        "  \"cohort_a_name\": \"{}\",",
+        json_escape_ca(&digest.cohort_a_name)
+    );
+    let _ = writeln!(
+        out,
+        "  \"cohort_b_name\": \"{}\",",
+        json_escape_ca(&digest.cohort_b_name)
+    );
+    let _ = writeln!(out, "  \"regulators_a\": {},", digest.regulators_a);
+    let _ = writeln!(out, "  \"regulators_b\": {},", digest.regulators_b);
+    let _ = writeln!(out, "  \"shared_count\": {},", digest.shared_count);
+    let _ = writeln!(
+        out,
+        "  \"direction_flip_count\": {},",
+        digest.direction_flip_count
+    );
+    let rho = if digest.spearman_rank_rho.is_finite() {
+        format!("{:.6}", digest.spearman_rank_rho)
+    } else {
+        String::from("0.0")
+    };
+    let _ = writeln!(out, "  \"spearman_rank_rho\": {rho},");
+    let _ = writeln!(out, "  \"entries\": [");
+    let n = digest.entries.len();
+    for (idx, e) in digest.entries.iter().enumerate() {
+        let comma = if idx + 1 < n { "," } else { "" };
+        let dz = if e.delta_z.is_finite() {
+            format!("{:.6}", e.delta_z)
+        } else {
+            String::from("0.0")
+        };
+        let _ = writeln!(
+            out,
+            "    {{\"regulator_id\": \"{}\", \"kind\": \"{}\", \"status\": \"{}\", \"rank_a\": {}, \"rank_b\": {}, \"rank_shift\": {}, \"z_a\": {}, \"z_b\": {}, \"delta_z\": {}, \"fdr_a\": {}, \"fdr_b\": {}, \"direction_flip\": {}}}{}",
+            json_escape_ca(&e.regulator_id),
+            json_escape_ca(&e.kind),
+            json_escape_ca(&e.status),
+            fmt_opt_usize(e.rank_a),
+            fmt_opt_usize(e.rank_b),
+            fmt_opt_i64(e.rank_shift),
+            fmt_opt_f64(e.z_a),
+            fmt_opt_f64(e.z_b),
+            dz,
+            fmt_opt_f64(e.fdr_a),
+            fmt_opt_f64(e.fdr_b),
+            e.direction_flip,
+            comma
+        );
+    }
+    let _ = writeln!(out, "  ]");
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+/// Formats [`PerturbationRankDiffDigest`] as a tidy CSV ledger.
+pub fn format_regulator_rank_diff_csv(digest: &PerturbationRankDiffDigest) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(1024);
+    out.push_str(
+        "regulator_id,kind,status,rank_a,rank_b,rank_shift,z_a,z_b,delta_z,fdr_a,fdr_b,direction_flip\n",
+    );
+    let fmt_opt_usize = |v: Option<usize>| v.map(|x| x.to_string()).unwrap_or_default();
+    let fmt_opt_i64 = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_default();
+    let fmt_opt_f64 = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
+    for e in &digest.entries {
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{},{},{},{:.6},{},{},{}",
+            e.regulator_id,
+            e.kind,
+            e.status,
+            fmt_opt_usize(e.rank_a),
+            fmt_opt_usize(e.rank_b),
+            fmt_opt_i64(e.rank_shift),
+            fmt_opt_f64(e.z_a),
+            fmt_opt_f64(e.z_b),
+            e.delta_z,
+            fmt_opt_f64(e.fdr_a),
+            fmt_opt_f64(e.fdr_b),
+            e.direction_flip
+        );
+    }
+    out
 }
 
 #[cfg(test)]
@@ -507,5 +791,29 @@ mod tests {
             .find(|h| h.signature_id == "SAME_DIR")
             .unwrap();
         assert_eq!(same_dir.connectivity_score, 0.0);
+    }
+
+    #[test]
+    fn regulator_rank_diff_digest_detects_flips_ranks_and_exports_json_csv() {
+        let kg = build_seed_knowledge_graph();
+        let cfg = CoreAnalysisConfig::default();
+        let cohorts = builtin_cohorts();
+        let rep_a = crate::run_core_analysis(&cohorts[0], &kg, &cfg);
+        let rep_b = crate::run_core_analysis(&cohorts[1], &kg, &cfg);
+
+        let digest = compute_regulator_rank_diff(&rep_a, &rep_b);
+        assert_eq!(digest.schema_version, "causal-atlas-rank-diff/v1");
+        assert!(!digest.entries.is_empty());
+        assert!(digest.spearman_rank_rho.is_finite());
+
+        let json = format_regulator_rank_diff_json(&digest).expect("serialize rank diff JSON");
+        assert!(json.contains("\"schema_version\": \"causal-atlas-rank-diff/v1\""));
+        assert!(json.contains("\"spearman_rank_rho\""));
+
+        let csv = format_regulator_rank_diff_csv(&digest);
+        assert!(csv.starts_with(
+            "regulator_id,kind,status,rank_a,rank_b,rank_shift,z_a,z_b,delta_z,fdr_a,fdr_b,direction_flip\n"
+        ));
+        assert!(csv.lines().count() >= 2);
     }
 }

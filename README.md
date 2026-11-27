@@ -34,6 +34,7 @@ Text-input-guarded hotkeys are ignored while typing in the Omnibox or table filt
 | Shortcut | Scope | Action |
 | :--- | :--- | :--- |
 | `Ctrl+F` / `Cmd+F` | Global | Focus the **Gene / Protein Omnibox** and open autocomplete |
+| `Ctrl+K` / `Cmd+K` | Global | Open fuzzy **Command Palette** modal (switch tabs, focus Omnibox, run analysis, reset clamps, export JSON/SVG/Rank-Diff digests) |
 | `1` – `5` | Global (outside text inputs) | Switch across the 5 workbench pillars (`Cohort & Volcano`, `Pathway Atlas`, `Causal Regulators`, `Phenotype & Drug Match`, `Knowledge Databases`) |
 | `F` or `0` | Global (outside text inputs) | Fit the **Pathway Atlas** camera to the active diagram (`Fit All`) |
 | `R` | Global (outside text inputs) | Clear all active **MAP** node clamps and drug-rescue pins |
@@ -59,6 +60,7 @@ Subcommands:
 - `tui [--input <PATH>]`: Launch the interactive SSH-compatible terminal UI (`ratatui`)
 - `analyze [--input <PATH>] [--output <PATH>] [--fc-cutoff <F64>] [--fdr-cutoff <F64>]`: Run headless Core Analysis (`--output` defaults to `causal_atlas_report.json`, `--fc-cutoff` `1.0`, `--fdr-cutoff` `0.05`)
 - `export-svg [--input <PATH>] [--out-dir <DIR>]`: Export `downstream_effects_treemap.svg` and `<pathway_id>_pathway_map.svg` (default `--out-dir`: `.`)
+- `diff [--input-a <PATH>] [--input-b <PATH>] [--json-out <PATH>] [--csv-out <PATH>] [--fc-cutoff <F64>] [--fdr-cutoff <F64>]`: Compare two perturbation/cohort conditions and export a **Regulator Rank-Comparison Diff Digest** (ranks, rank shifts, `delta_z`, direction flips, Spearman `rho`) as JSON and/or CSV
 
 ```bash
 # 1. Run all unit & headless validation tests across the workspace
@@ -95,6 +97,8 @@ Observed results on the `HUVEC + TNF Inflammatory Cascade` (`28` measured genes,
 - **T3 (Multi-Hop CNA & Rank-Based CMap)**: `25` causal network hypotheses for TNF (`TNF` `K=2`, `Z = +4.69`, `net_bias_p = 9.99e-4`); recovers transcriptionally silent `SOST` (`log2FC = -0.35`, inferred `Z = -4.12`, `net_bias_p = 9.99e-4`) in Cohort 3; scores `30` perturbation signatures (`12` reversers, `14` mimickers), led by reversers `BMS-345541` (`-92.4`), `KLF2 Lentiviral Overexpression` (`-91.7`), and `TPCA-1` (`-90.0`).
 
 Artifacts: [`validation/causal_atlas_validation_summary.json`](validation/causal_atlas_validation_summary.json), [`validation/upstream_regulators_ranked.csv`](validation/upstream_regulators_ranked.csv), and [`validation/README.md`](validation/README.md).
+
+- **Workspace Release Test Suite (`cargo test --release`)**: `44 passed; 0 failed` (`ca-app` 15, `ca-core` 20 + 3 `headless_validation`, `ca-streams` 6) with `0` non-test `.unwrap()` calls across all crates.
 
 ## Citation & CRV Science Apps Hub
 

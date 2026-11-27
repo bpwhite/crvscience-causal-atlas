@@ -34,7 +34,11 @@ use std::io;
 use std::time::Duration;
 
 fn restore_terminal_buffer<W: io::Write>(out: &mut W) -> io::Result<()> {
-    execute!(out, LeaveAlternateScreen, cursor::Show)
+    if execute!(out, LeaveAlternateScreen, cursor::Show).is_err() {
+        out.write_all(b"\x1b[?1049l\x1b[?25h")?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 struct TuiSessionGuard {

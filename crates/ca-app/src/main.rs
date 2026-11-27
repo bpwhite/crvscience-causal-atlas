@@ -23,8 +23,9 @@ mod theme;
 mod tui;
 
 use ca_core::{
-    builtin_cohorts, parse_expression_table, run_core_analysis, seed_kb::build_seed_knowledge_graph,
-    simulate_map, CoreAnalysisConfig,
+    builtin_cohorts, compute_regulator_rank_diff, format_regulator_rank_diff_csv,
+    format_regulator_rank_diff_json, parse_expression_table, run_core_analysis,
+    seed_kb::build_seed_knowledge_graph, simulate_map, CoreAnalysisConfig,
 };
 use ca_streams::{
     client::import_local_stream_file, run_batch_download_and_update, SqliteKnowledgeStore,
@@ -106,6 +107,28 @@ enum Commands {
         /// Output directory for generated `.svg` diagrams
         #[arg(short, long, default_value = ".")]
         out_dir: PathBuf,
+    },
+
+    /// Compare two perturbation/cohort conditions and export a regulator rank-comparison diff digest (JSON/CSV)
+    Diff {
+        /// Optional input expression CSV/TSV for Condition A (defaults to built-in cohort 0)
+        #[arg(long)]
+        input_a: Option<PathBuf>,
+        /// Optional input expression CSV/TSV for Condition B (defaults to built-in cohort 1)
+        #[arg(long)]
+        input_b: Option<PathBuf>,
+        /// Output JSON path for the rank-comparison diff digest
+        #[arg(long, default_value = "regulator_rank_diff.json")]
+        json_out: PathBuf,
+        /// Optional output CSV path for the rank-comparison diff ledger
+        #[arg(long)]
+        csv_out: Option<PathBuf>,
+        /// Minimum |log2FC| cutoff
+        #[arg(long, default_value_t = 1.0)]
+        fc_cutoff: f64,
+        /// Maximum BH-FDR cutoff
+        #[arg(long, default_value_t = 0.05)]
+        fdr_cutoff: f64,
     },
 }
 
@@ -491,7 +514,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("Input");
                 parse_expression_table(name, &raw)?
             } else {
-                builtin_cohorts().into_iter().next().unwrap()
+                builtin_cohorts()
+                    .into_iter()
+                    .next()
+                    .ok_or("No built-in expression cohorts available")?
             };
             let cfg = CoreAnalysisConfig::default();
             let report = if let Some(cached) = store.get_cached_analysis(&dataset, &cfg)? {
@@ -519,7 +545,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("Input");
                 parse_expression_table(name, &raw)?
             } else {
-                builtin_cohorts().into_iter().next().unwrap()
+                builtin_cohorts()
+                    .into_iter()
+                    .next()
+                    .ok_or("No built-in expression cohorts available")?
             };
             let cfg = CoreAnalysisConfig {
                 abs_log2fc_cutoff: fc_cutoff,
@@ -556,7 +585,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("Input");
                 parse_expression_table(name, &raw)?
             } else {
-                builtin_cohorts().into_iter().next().unwrap()
+                builtin_cohorts()
+                    .into_iter()
+                    .next()
+                    .ok_or("No built-in expression cohorts available")?
             };
             let cfg = CoreAnalysisConfig::default();
             let report = if let Some(cached) = store.get_cached_analysis(&dataset, &cfg)? {
@@ -588,6 +620,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::fs::write(&pw_path, pw_svg)?;
                     println!("Wrote {}", pw_path.display());
                 }
+            }
+        }
+        Commands::Diff {
+            input_a,
+            input_b,
+            json_out,
+            csv_out,
+            fc_cutoff,
+            fdr_cutoff,
+        } => {
+            let store = open_seeded_db(&db_path)?;
+            let graph = store.load_knowledge_graph()?;
+            let mut defaults = builtin_cohorts().into_iter();
+            let ds_a = if let Some(in_path) = input_a {
+                let raw = std::fs::read_to_string(&in_path)?;
+                let name = in_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Condition_A");
+                parse_expression_table(name, &raw)?
+            } else {
+                defaults
+                    .next()
+                    .ok_or("No built-in Condition A cohort available")?
+            };
+            let ds_b = if let Some(in_path) = input_b {
+                let raw = std::fs::read_to_string(&in_path)?;
+                let name = in_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Condition_B");
+                parse_expression_table(name, &raw)?
+            } else {
+                defaults
+                    .next()
+                    .ok_or("No built-in Condition B cohort available")?
+            };
+            let cfg = CoreAnalysisConfig {
+                abs_log2fc_cutoff: fc_cutoff,
+                fdr_cutoff,
+                ..CoreAnalysisConfig::default()
+            };
+            let rep_a = if let Some(cached) = store.get_cached_analysis(&ds_a, &cfg)? {
+                cached
+            } else {
+                let r = run_core_analysis(&ds_a, &graph, &cfg);
+                store.put_cached_analysis(&ds_a, &cfg, &r)?;
+                r
+            };
+            let rep_b = if let Some(cached) = store.get_cached_analysis(&ds_b, &cfg)? {
+                cached
+            } else {
+                let r = run_core_analysis(&ds_b, &graph, &cfg);
+                store.put_cached_analysis(&ds_b, &cfg, &r)?;
+                r
+            };
+            let digest = compute_regulator_rank_diff(&rep_a, &rep_b);
+            let json_txt = format_regulator_rank_diff_json(&digest)?;
+            std::fs::write(&json_out, json_txt)?;
+            println!(
+                "Saved Regulator Rank Diff JSON ('{}' vs '{}', {} shared, {} flips, rho={:.3}) -> {}",
+                digest.cohort_a_name,
+                digest.cohort_b_name,
+                digest.shared_count,
+                digest.direction_flip_count,
+                digest.spearman_rank_rho,
+                json_out.display()
+            );
+            if let Some(csv_path) = csv_out {
+                std::fs::write(&csv_path, format_regulator_rank_diff_csv(&digest))?;
+                println!("Saved Regulator Rank Diff CSV -> {}", csv_path.display());
             }
         }
     }
